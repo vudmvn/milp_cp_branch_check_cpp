@@ -229,6 +229,17 @@ namespace bbcp
                 return true;
             }
 
+            bool RetrieveBestValidSolution(std::vector<int> &ysol, XMatrix &xsol, CPResult &schedule, double &ub) const
+            {
+                if (best_valid_ub_ >= static_cast<double>(INF64) || !best_schedule_.feasible)
+                    return false;
+                ysol = best_ysol_;
+                xsol = best_xsol_;
+                schedule = best_schedule_;
+                ub = best_valid_ub_;
+                return true;
+            }
+
         protected:
             void callback() override
             {
@@ -269,6 +280,9 @@ namespace bbcp
             Stats stats_;
             mutable std::mutex mutex_;
             double best_valid_ub_ = static_cast<double>(INF64);
+            std::vector<int> best_ysol_;
+            XMatrix best_xsol_;
+            CPResult best_schedule_;
 
             std::string AssignmentKey(const std::vector<int> &y) const
             {
@@ -500,6 +514,9 @@ namespace bbcp
                 if (sol_makespan < best_valid_ub_)
                 {
                     best_valid_ub_ = sol_makespan;
+                    best_ysol_ = ybar;
+                    best_xsol_ = xb;
+                    best_schedule_ = cache.schedule;
                     if (opt_.verbose)
                         std::cout << "[INCUMBENT] Initial/updated valid UB: " << best_valid_ub_ << '\n';
                 }
@@ -551,6 +568,9 @@ namespace bbcp
                             if (new_sol < best_valid_ub_)
                             {
                                 best_valid_ub_ = new_sol;
+                                best_ysol_ = ybar;
+                                best_xsol_ = xb;
+                                best_schedule_ = cache.schedule;
                                 if (opt_.verbose)
                                     std::cout << "[INCUMBENT-P1] Improved valid UB: " << best_valid_ub_ << '\n';
                             }
@@ -828,12 +848,32 @@ namespace bbcp
                     xsol[i][j] = x[i][j].get(GRB_DoubleAttr_X) > 0.5;
 
         CPResult schedule;
-        if (!cb.RetrieveSchedule(ysol, schedule) ||
-            !schedule.feasible ||
-            schedule.objective > zD.get(GRB_DoubleAttr_X) + 1e-6)
+        double best_valid_ub = static_cast<double>(INF64);
+        bool has_valid_schedule = false;
+
+        if (cb.RetrieveBestValidSolution(ysol, xsol, schedule, best_valid_ub))
         {
-            std::cerr << "[NOT CERTIFIED] Final incumbent has no certified "
-                         "drone schedule under its z_D.\n";
+            has_valid_schedule = true;
+        }
+        else if (cb.RetrieveSchedule(ysol, schedule) && schedule.feasible)
+        {
+            has_valid_schedule = true;
+        }
+        else
+        {
+            std::vector<Node> D_curr;
+            for (int i = 1; i <= inst_.n; ++i)
+                if (ysol[i])
+                    D_curr.push_back(i);
+            CPOptions final_cfg = options_.cp_options;
+            final_cfg.time_limit_seconds = 10.0;
+            schedule = cp.SolveDroneSubproblem(D_curr, final_cfg);
+            has_valid_schedule = schedule.feasible;
+        }
+
+        if (!has_valid_schedule)
+        {
+            std::cerr << "[NOT CERTIFIED] Final incumbent has no certified drone schedule.\n";
             return;
         }
 
@@ -864,12 +904,14 @@ namespace bbcp
         const double tt = static_cast<double>(ComputeTruckTime(inst_, xsol));
         const double dt = static_cast<double>(schedule.objective);
         const double achieved = std::max(tt, dt);
-        const double obj = model.get(GRB_DoubleAttr_ObjVal);
-        if (achieved > obj + 1e-6)
+        double obj = model.get(GRB_DoubleAttr_ObjVal);
+        if (status == GRB_OPTIMAL && achieved > obj + 1e-6)
         {
-            std::cerr << "[NOT CERTIFIED] Decoded schedule exceeds Master objective.\n";
+            std::cerr << "[NOT CERTIFIED] Decoded schedule exceeds Master objective at optimality.\n";
             return;
         }
+        if (achieved > obj)
+            obj = achieved;
 
         double gap = -1;
         try
