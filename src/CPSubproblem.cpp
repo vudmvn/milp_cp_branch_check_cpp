@@ -1,381 +1,357 @@
 #include "CPSubproblem.h"
 
+#include <algorithm>
+#include <cmath>
+#include <cstdint>
 #include <iostream>
-#include <map>
+#include <limits>
 #include <set>
 #include <string>
 #include <vector>
 
 #include "ortools/sat/cp_model.h"
 
-namespace bbcp {
+namespace bbcp
+{
 
-using operations_research::Domain;
-using operations_research::sat::BoolVar;
-using operations_research::sat::CpModelBuilder;
-using operations_research::sat::CpSolverResponse;
-using operations_research::sat::CpSolverStatus;
-using operations_research::sat::IntVar;
-using operations_research::sat::LinearExpr;
-using operations_research::sat::Model;
-using operations_research::sat::NewSatParameters;
-using operations_research::sat::SatParameters;
-using operations_research::sat::SolutionBooleanValue;
-using operations_research::sat::SolutionIntegerValue;
-using operations_research::sat::SolveCpModel;
+    using operations_research::Domain;
+    using operations_research::sat::BoolVar;
+    using operations_research::sat::CpModelBuilder;
+    using operations_research::sat::CpSolverResponse;
+    using operations_research::sat::CpSolverStatus;
+    using operations_research::sat::IntVar;
+    using operations_research::sat::LinearExpr;
+    using operations_research::sat::Model;
+    using operations_research::sat::NewSatParameters;
+    using operations_research::sat::SatParameters;
+    using operations_research::sat::SolutionBooleanValue;
+    using operations_research::sat::SolutionIntegerValue;
+    using operations_research::sat::SolveCpModel;
 
-namespace {
+    namespace
+    {
+        LinearExpr SumBool(const std::vector<BoolVar> &v)
+        {
+            LinearExpr expr;
+            for (const BoolVar &b : v)
+                expr += b;
+            return expr;
+        }
 
-LinearExpr SumBool(const std::vector<BoolVar>& vars) {
-    LinearExpr expr;
-    for (const BoolVar& v : vars) {
-        expr += v;
-    }
-    return expr;
-}
+        // Construct a feasible hint: H nonempty chains, each sorted by customer id.
+        // The hint is optional: feasibility and exactness never rely on its quality.
+        void AddGreedyHint(CpModelBuilder &model,
+                           const Instance &inst,
+                           const std::vector<Node> &D,
+                           const std::vector<BoolVar> &h,
+                           const std::vector<BoolVar> &s,
+                           const std::vector<IntVar> &start,
+                           const std::vector<IntVar> &end,
+                           const std::vector<IntVar> &size,
+                           const std::vector<IntVar> &battery,
+                           const std::vector<IntVar> &order,
+                           const std::vector<std::vector<BoolVar>> &u,
+                           const IntVar &z, int H)
+        {
+            const int m = static_cast<int>(D.size());
+            std::vector<int> predecessor(m, -1), position(m, 1), swap(m, 0);
+            std::vector<int64_t> finish(H, 0), remaining(H, inst.battery_capacity);
+            std::vector<int> last(H, -1);
+            std::vector<int64_t> st(m, 0), sz(m, 0), batt(m, 0);
 
-}  // namespace
+            for (int a = 0; a < m; ++a)
+            {
+                int k = (a < H ? a : 0);
+                if (a >= H)
+                {
+                    for (int t = 1; t < H; ++t)
+                        if (finish[t] < finish[k])
+                            k = t;
+                }
+                predecessor[a] = last[k];
+                if (last[k] != -1)
+                    position[a] = position[last[k]] + 1;
+                const int64_t need = inst.energy[D[a]];
+                if (last[k] != -1 && remaining[k] < need)
+                {
+                    swap[a] = 1;
+                    remaining[k] = inst.battery_capacity;
+                }
+                st[a] = finish[k];
+                batt[a] = remaining[k];
+                sz[a] = inst.DroneRoundTripTime(D[a]) + inst.swap_time * swap[a];
+                finish[k] += sz[a];
+                remaining[k] -= need;
+                last[k] = a;
+            }
 
-CPSubproblem::CPSubproblem(const Instance& inst) : inst_(inst) {}
+            for (int a = 0; a < m; ++a)
+            {
+                model.AddHint(h[a], predecessor[a] == -1);
+                model.AddHint(s[a], swap[a] == 1);
+                model.AddHint(start[a], st[a]);
+                model.AddHint(end[a], st[a] + sz[a]);
+                model.AddHint(size[a], sz[a]);
+                model.AddHint(battery[a], batt[a]);
+                model.AddHint(order[a], position[a]);
+            }
+            for (int a = 0; a < m; ++a)
+                for (int b = 0; b < m; ++b)
+                    if (a != b)
+                        model.AddHint(u[a][b], predecessor[b] == a);
+            model.AddHint(z, *std::max_element(finish.begin(), finish.end()));
+        }
+    } // namespace
 
-CPResult CPSubproblem::SolveDroneSubproblem(
-    const std::vector<Node>& drone_customers,
-    const CPOptions& options
-) const {
-    CPResult result;
+    CPSubproblem::CPSubproblem(const Instance &inst) : inst_(inst) {}
 
-    const int m = static_cast<int>(drone_customers.size());
+    CPResult CPSubproblem::SolveDroneSubproblem(
+        const std::vector<Node> &drone_customers,
+        const CPOptions &options,
+        int64_t deadline) const
+    {
+        CPResult result;
+        result.is_decision = deadline >= 0;
 
-    // Empty drone set: feasible with zero drone makespan.
-    if (m == 0) {
-        result.feasible = true;
-        result.optimal = true;
-        result.objective = 0;
-        return result;
-    }
+        // Sorting guarantees consistency of the symmetry-breaking rule:
+        // a backward link i>j must have a battery swap before j.
+        std::vector<Node> D = drone_customers;
+        std::sort(D.begin(), D.end());
+        const int m = static_cast<int>(D.size());
 
-    // Validate all customers assigned to the CP drone subproblem.
-    for (Node i : drone_customers) {
-        if (i <= 0 || i > inst_.n || !inst_.drone_feasible[i]) {
-            result.feasible = false;
+        if (inst_.n_drones < 1 || inst_.battery_capacity <= 0 ||
+            inst_.swap_time < 0 || options.time_limit_seconds < 0 ||
+            std::adjacent_find(D.begin(), D.end()) != D.end())
+        {
+            result.status = CPStatus::ModelInvalid;
             return result;
         }
-    }
 
-    CpModelBuilder model;
-
-    // A safe but loose horizon:
-    // all drone sorties plus a possible swap before each sortie.
-    int64_t horizon = 0;
-    for (Node i : drone_customers) {
-        horizon += inst_.DroneRoundTripTime(i) + inst_.swap_time;
-    }
-    horizon += 10;
-
-    std::vector<BoolVar> h(m);
-    std::vector<BoolVar> s(m);
-    std::vector<IntVar> start(m);
-    std::vector<IntVar> end(m);
-    std::vector<IntVar> size(m);
-    std::vector<IntVar> battery(m);
-    std::vector<IntVar> order(m);
-
-    std::vector<std::vector<BoolVar>> u(m, std::vector<BoolVar>(m));
-
-    for (int a = 0; a < m; ++a) {
-        Node i = drone_customers[a];
-
-        h[a] = model.NewBoolVar().WithName("h_" + std::to_string(i));
-        s[a] = model.NewBoolVar().WithName("s_" + std::to_string(i));
-
-        start[a] = model.NewIntVar(Domain(0, horizon)).WithName(
-            "start_" + std::to_string(i)
-        );
-
-        end[a] = model.NewIntVar(Domain(0, horizon)).WithName(
-            "end_" + std::to_string(i)
-        );
-
-        size[a] = model.NewIntVar(Domain(0, horizon)).WithName(
-            "size_" + std::to_string(i)
-        );
-
-        battery[a] = model.NewIntVar(Domain(0, inst_.battery_capacity)).WithName(
-            "battery_" + std::to_string(i)
-        );
-
-        order[a] = model.NewIntVar(Domain(1, m)).WithName(
-            "order_" + std::to_string(i)
-        );
-    }
-
-    for (int a = 0; a < m; ++a) {
-        for (int b = 0; b < m; ++b) {
-            if (a == b) continue;
-
-            u[a][b] = model.NewBoolVar().WithName(
-                "u_" + std::to_string(drone_customers[a]) +
-                "_" + std::to_string(drone_customers[b])
-            );
-        }
-    }
-
-    IntVar z = model.NewIntVar(Domain(0, horizon)).WithName("z_drone");
-
-    // ------------------------------------------------------------------
-    // Symmetry-breaking / tightening 1:
-    // Use exactly min(K, m) anonymous drone chains.
-    //
-    // This is safe here because this CP subproblem has no fixed activation
-    // cost for using an additional drone. More chains cannot make the
-    // makespan worse.
-    // ------------------------------------------------------------------
-    const int used_chains = std::min(inst_.n_drones, m);
-
-    {
-        std::vector<BoolVar> heads;
-        for (int a = 0; a < m; ++a) {
-            heads.push_back(h[a]);
+        if (m == 0)
+        {
+            result.status = CPStatus::Optimal;
+            result.feasible = true;
+            result.optimal = !result.is_decision;
+            result.objective = 0;
+            result.lower_bound = 0;
+            return result;
         }
 
-        model.AddEquality(SumBool(heads), used_chains);
-    }
+        int64_t horizon = 0;
+        for (Node i : D)
+        {
+            if (i < 1 || i > inst_.n || !inst_.drone_feasible[i] ||
+                inst_.energy[i] < 0 || inst_.energy[i] > inst_.battery_capacity ||
+                inst_.DroneRoundTripTime(i) < 0)
+            {
+                result.status = CPStatus::ModelInvalid;
+                return result;
+            }
+            const int64_t r = inst_.DroneRoundTripTime(i);
+            if (horizon > INF64 - r - inst_.swap_time)
+            {
+                result.status = CPStatus::ModelInvalid;
+                return result;
+            }
+            horizon += r + inst_.swap_time;
+        }
+        // All sorties on one drone with a swap between successive sorties.
+        // This constructs a safe finite horizon, including for m=1.
+        const int H = std::min(inst_.n_drones, m);
 
-    // ------------------------------------------------------------------
-    // Symmetry-breaking / tightening 2:
-    // If H chains cover m customers, then exactly m-H successor arcs are used.
-    // ------------------------------------------------------------------
-    {
+        CpModelBuilder model;
+        std::vector<BoolVar> h(m), s(m);
+        std::vector<IntVar> start(m), end(m), size(m), battery(m), order(m);
+        std::vector<std::vector<BoolVar>> u(m, std::vector<BoolVar>(m));
+
+        for (int a = 0; a < m; ++a)
+        {
+            const Node i = D[a];
+            h[a] = model.NewBoolVar().WithName("h_" + std::to_string(i));
+            s[a] = model.NewBoolVar().WithName("swap_" + std::to_string(i));
+            start[a] = model.NewIntVar(Domain(0, horizon)).WithName("start_" + std::to_string(i));
+            end[a] = model.NewIntVar(Domain(0, horizon)).WithName("end_" + std::to_string(i));
+            size[a] = model.NewIntVar(Domain(0, horizon)).WithName("size_" + std::to_string(i));
+            battery[a] = model.NewIntVar(Domain(0, inst_.battery_capacity)).WithName("battery_" + std::to_string(i));
+            order[a] = model.NewIntVar(Domain(1, m)).WithName("order_" + std::to_string(i));
+        }
+        for (int a = 0; a < m; ++a)
+            for (int b = 0; b < m; ++b)
+                if (a != b)
+                    u[a][b] = model.NewBoolVar().WithName(
+                        "u_" + std::to_string(D[a]) + "_" + std::to_string(D[b]));
+
+        IntVar z = model.NewIntVar(Domain(0, horizon)).WithName("z_drone");
+
+        // Exactly H non-empty drone chains: safe because splitting chains
+        // cannot increase makespan with independent drone batteries.
+        model.AddEquality(SumBool(h), H);
         std::vector<BoolVar> arcs;
-        for (int a = 0; a < m; ++a) {
-            for (int b = 0; b < m; ++b) {
-                if (a == b) continue;
-                arcs.push_back(u[a][b]);
+        for (int a = 0; a < m; ++a)
+            for (int b = 0; b < m; ++b)
+                if (a != b)
+                    arcs.push_back(u[a][b]);
+        model.AddEquality(SumBool(arcs), m - H);
+
+        for (int a = 0; a < m; ++a)
+        {
+            LinearExpr incoming = h[a];
+            LinearExpr outgoing;
+            for (int b = 0; b < m; ++b)
+            {
+                if (a == b)
+                    continue;
+                incoming += u[b][a];
+                outgoing += u[a][b];
+            }
+            model.AddEquality(incoming, 1);
+            model.AddLessOrEqual(outgoing, 1);
+
+            model.AddEquality(start[a], 0).OnlyEnforceIf(h[a]);
+            model.AddEquality(s[a], 0).OnlyEnforceIf(h[a]);
+            model.AddEquality(battery[a], inst_.battery_capacity).OnlyEnforceIf(h[a]);
+            model.AddEquality(order[a], 1).OnlyEnforceIf(h[a]);
+            model.AddGreaterOrEqual(order[a], 2).OnlyEnforceIf(h[a].Not());
+
+            model.AddEquality(size[a], LinearExpr(inst_.DroneRoundTripTime(D[a])) + inst_.swap_time * s[a]);
+            model.AddEquality(end[a], start[a] + size[a]);
+            model.AddGreaterOrEqual(battery[a], inst_.energy[D[a]]);
+            model.AddGreaterOrEqual(z, end[a]);
+        }
+
+        for (int a = 0; a < m; ++a)
+        {
+            const Node i = D[a];
+            for (int b = 0; b < m; ++b)
+            {
+                if (a == b)
+                    continue;
+                const Node j = D[b];
+                // Symmetry: within a battery cycle sort customers by ID.
+                if (i > j)
+                    model.AddImplication(u[a][b], s[b]);
+                // Redundant battery incompatibility propagates mandatory swaps.
+                if (inst_.energy[i] + inst_.energy[j] > inst_.battery_capacity)
+                    model.AddImplication(u[a][b], s[b]);
+
+                model.AddImplication(u[a][b], h[b].Not());
+                model.AddEquality(start[b], end[a]).OnlyEnforceIf(u[a][b]);
+                model.AddGreaterOrEqual(order[b], order[a] + 1).OnlyEnforceIf(u[a][b]);
+                model.AddEquality(battery[b], battery[a] - inst_.energy[i])
+                    .OnlyEnforceIf({u[a][b], s[b].Not()});
+                model.AddEquality(battery[b], inst_.battery_capacity)
+                    .OnlyEnforceIf({u[a][b], s[b]});
             }
         }
 
-        model.AddEquality(SumBool(arcs), m - used_chains);
-    }
-
-    // ------------------------------------------------------------------
-    // Chain and timing constraints.
-    // ------------------------------------------------------------------
-    for (int a = 0; a < m; ++a) {
-        Node i = drone_customers[a];
-
-        // h_i + incoming_i = 1 because every customer in this subproblem
-        // must be served by a drone.
-        LinearExpr incoming = h[a];
-        for (int b = 0; b < m; ++b) {
-            if (a == b) continue;
-            incoming += u[b][a];
+        // H battery cycles initially, plus one new cycle for each swap.
+        LinearExpr energy_available;
+        int64_t total_energy = 0;
+        for (int a = 0; a < m; ++a)
+        {
+            energy_available += inst_.battery_capacity * h[a];
+            energy_available += inst_.battery_capacity * s[a];
+            total_energy += inst_.energy[D[a]];
         }
-        model.AddEquality(incoming, 1);
+        model.AddGreaterOrEqual(energy_available, total_energy);
 
-        // At most one successor.
-        LinearExpr outgoing;
-        for (int b = 0; b < m; ++b) {
-            if (a == b) continue;
-            outgoing += u[a][b];
+        if (options.use_warm_start)
+            AddGreedyHint(model, inst_, D, h, s, start, end, size, battery,
+                          order, u, z, H);
+
+        if (result.is_decision)
+            model.AddLessOrEqual(z, deadline);
+        else
+            model.Minimize(z);
+
+        Model cp_model;
+        SatParameters params;
+        if (options.time_limit_seconds > 0.0)
+            params.set_max_time_in_seconds(options.time_limit_seconds);
+        params.set_num_search_workers(8);
+        params.set_log_search_progress(options.log_search);
+        if (options.stop_after_first_solution)
+            params.set_stop_after_first_solution(true);
+        cp_model.Add(NewSatParameters(params));
+
+        const CpSolverResponse response = SolveCpModel(model.Build(), &cp_model);
+        result.wall_time = response.wall_time();
+
+        switch (response.status())
+        {
+        case CpSolverStatus::OPTIMAL:
+            result.status = CPStatus::Optimal;
+            break;
+        case CpSolverStatus::FEASIBLE:
+            result.status = CPStatus::Feasible;
+            break;
+        case CpSolverStatus::INFEASIBLE:
+            result.status = CPStatus::Infeasible;
+            break;
+        case CpSolverStatus::MODEL_INVALID:
+            result.status = CPStatus::ModelInvalid;
+            break;
+        default:
+            result.status = CPStatus::Unknown;
+            break;
         }
-        model.AddLessOrEqual(outgoing, 1);
+        result.feasible = (result.status == CPStatus::Optimal ||
+                           result.status == CPStatus::Feasible);
+        result.optimal = (!result.is_decision && result.status == CPStatus::Optimal);
 
-        // If a is a head, it starts at time 0, no swap before it,
-        // and its battery is full.
-        model.AddEquality(start[a], 0).OnlyEnforceIf(h[a]);
-        model.AddEquality(s[a], 0).OnlyEnforceIf(h[a]);
-        model.AddEquality(battery[a], inst_.battery_capacity).OnlyEnforceIf(h[a]);
+        if (!result.is_decision && result.status != CPStatus::ModelInvalid &&
+            result.status != CPStatus::Infeasible)
+        {
+            // For an integral objective, ceil(certified_bound - tolerance)
+            // remains a certified integer lower bound (within numerical tolerance).
+            const double b = response.best_objective_bound();
+            if (std::isfinite(b) && b >= 0.0 && b < static_cast<double>(INF64))
+                result.lower_bound = static_cast<int64_t>(std::ceil(b - 1e-6));
+        }
+        if (!result.feasible)
+            return result;
 
-        // Tighten the order variable:
-        //   head     => order = 1
-        //   non-head => order >= 2
-        model.AddEquality(order[a], 1).OnlyEnforceIf(h[a]);
-        model.AddGreaterOrEqual(order[a], 2).OnlyEnforceIf(h[a].Not());
+        result.objective = SolutionIntegerValue(response, z);
+        if (result.optimal)
+            result.lower_bound = result.objective;
 
-        // Duration = round-trip flight time + swap_time * s_i.
-        //
-        // If s_i = 1, it means the drone swaps battery immediately before
-        // launching the sortie 0 -> i -> 0.
-        model.AddEquality(
-            size[a],
-            LinearExpr(inst_.DroneRoundTripTime(i)) + inst_.swap_time * s[a]
-        );
-
-        model.AddEquality(end[a], start[a] + size[a]);
-
-        // Must have enough battery before serving i.
-        model.AddGreaterOrEqual(battery[a], inst_.energy[i]);
-
-        // Drone makespan.
-        model.AddGreaterOrEqual(z, end[a]);
-    }
-
-    // ------------------------------------------------------------------
-    // Successor constraints.
-    // ------------------------------------------------------------------
-    for (int a = 0; a < m; ++a) {
-        Node i = drone_customers[a];
-
-        for (int b = 0; b < m; ++b) {
-            if (a == b) continue;
-
-            // Customer-order symmetry breaking:
-            //
-            //     u_ij <= s_j, for i > j.
-            //
-            // If i > j and j immediately follows i, then there must be
-            // a battery swap before j.
-            Node j = drone_customers[b];
-
-            if (i > j) {
-                model.AddImplication(u[a][b], s[b]);
+        std::vector<bool> reached(m, false);
+        for (int a = 0; a < m; ++a)
+        {
+            if (!SolutionBooleanValue(response, h[a]))
+                continue;
+            std::vector<Node> chain;
+            std::vector<int> swaps;
+            int cur = a;
+            while (cur != -1 && !reached[cur])
+            {
+                reached[cur] = true;
+                chain.push_back(D[cur]);
+                swaps.push_back(SolutionBooleanValue(response, s[cur]) ? 1 : 0);
+                int next = -1;
+                for (int b = 0; b < m; ++b)
+                {
+                    if (b != cur && SolutionBooleanValue(response, u[cur][b]))
+                    {
+                        next = b;
+                        break;
+                    }
+                }
+                cur = next;
             }
-
-
-            // If b has a predecessor a, then b cannot be a chain head.
-            model.AddImplication(u[a][b], h[b].Not());
-
-            // If u_ij = 1, then start_j = end_i.
-            model.AddEquality(start[b], end[a]).OnlyEnforceIf(u[a][b]);
-
-            // Order eliminates directed cycles.
-            model.AddGreaterOrEqual(order[b], order[a] + 1).OnlyEnforceIf(u[a][b]);
-
-            // If no swap before b, battery_b = battery_a - energy_i.
-            model.AddEquality(
-                battery[b],
-                battery[a] - inst_.energy[i]
-            ).OnlyEnforceIf({u[a][b], s[b].Not()});
-
-            // If swap before b, battery_b is reset to full capacity.
-            model.AddEquality(
-                battery[b],
-                inst_.battery_capacity
-            ).OnlyEnforceIf({u[a][b], s[b]});
+            result.chains.push_back(std::move(chain));
+            result.swap_before.push_back(std::move(swaps));
         }
-    }
-
-    // ------------------------------------------------------------------
-    // Aggregate energy cut:
-    //
-    //     E * (#heads + #swaps) >= sum_i energy_i
-    //
-    // This is redundant but helps propagation.
-    // ------------------------------------------------------------------
-    {
-        LinearExpr available;
-
-        for (int a = 0; a < m; ++a) {
-            available += inst_.battery_capacity * h[a];
-            available += inst_.battery_capacity * s[a];
+        // Do not fabricate missing drone jobs during decoding.
+        if (std::find(reached.begin(), reached.end(), false) != reached.end())
+        {
+            result.status = CPStatus::ModelInvalid;
+            result.feasible = false;
+            result.optimal = false;
+            result.chains.clear();
+            result.swap_before.clear();
         }
-
-        int64_t required = 0;
-        for (Node i : drone_customers) {
-            required += inst_.energy[i];
-        }
-
-        model.AddGreaterOrEqual(available, required);
-    }
-
-    model.Minimize(z);
-
-    // ------------------------------------------------------------------
-    // Solve CP-SAT model.
-    // ------------------------------------------------------------------
-    Model cp_model;
-
-    SatParameters params;
-    params.set_max_time_in_seconds(options.time_limit_seconds);
-    params.set_num_search_workers(1);
-    params.set_log_search_progress(options.log_search);
-
-    if (options.stop_after_first_solution) {
-        params.set_stop_after_first_solution(true);
-    }
-
-    cp_model.Add(NewSatParameters(params));
-
-    const CpSolverResponse response = SolveCpModel(model.Build(), &cp_model);
-
-    result.wall_time = response.wall_time();
-
-    const CpSolverStatus status = response.status();
-    result.feasible = (
-        status == CpSolverStatus::OPTIMAL ||
-        status == CpSolverStatus::FEASIBLE
-    );
-    result.optimal = (status == CpSolverStatus::OPTIMAL);
-
-    if (!result.feasible) {
         return result;
     }
 
-    result.objective = SolutionIntegerValue(response, z);
-
-    // ------------------------------------------------------------------
-    // Decode chains from heads and successor arcs.
-    //
-    // Also decode swap decisions:
-    //   s_i = 1 means a battery swap is performed immediately before i.
-    //
-    // The decoded arrays satisfy:
-    //   result.chains[k][p]      = customer at position p in chain k
-    //   result.swap_before[k][p] = 1 iff swap before that customer
-    // ------------------------------------------------------------------
-    std::vector<bool> reached(m, false);
-
-    for (int a = 0; a < m; ++a) {
-        if (!SolutionBooleanValue(response, h[a])) continue;
-
-        std::vector<Node> chain;
-        std::vector<int> chain_swaps;
-
-        int cur = a;
-
-        while (true) {
-            if (reached[cur]) break;
-
-            reached[cur] = true;
-
-            chain.push_back(drone_customers[cur]);
-            chain_swaps.push_back(
-                SolutionBooleanValue(response, s[cur]) ? 1 : 0
-            );
-
-            int nxt = -1;
-
-            for (int b = 0; b < m; ++b) {
-                if (b == cur) continue;
-
-                if (SolutionBooleanValue(response, u[cur][b])) {
-                    nxt = b;
-                    break;
-                }
-            }
-
-            if (nxt == -1) break;
-
-            cur = nxt;
-        }
-
-        result.chains.push_back(chain);
-        result.swap_before.push_back(chain_swaps);
-    }
-
-    // Safety fallback: if something was not reached, report it as a
-    // singleton chain. This should not happen for a valid CP solution,
-    // but it prevents silent loss during debugging.
-    for (int a = 0; a < m; ++a) {
-        if (reached[a]) continue;
-
-        result.chains.push_back({drone_customers[a]});
-        result.swap_before.push_back({
-            SolutionBooleanValue(response, s[a]) ? 1 : 0
-        });
-    }
-
-    return result;
-}
-
-}  // namespace bbcp
+} // namespace bbcp

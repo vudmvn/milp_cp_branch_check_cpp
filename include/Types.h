@@ -8,119 +8,119 @@
 #include <utility>
 #include <vector>
 
-namespace bbcp {
+namespace bbcp
+{
 
-using Node = int;
+    using Node = int;
 
-constexpr int64_t INF64 = std::numeric_limits<int64_t>::max() / 4;
-constexpr int64_t INF_ENERGY = 1000000000LL;
+    constexpr int64_t INF64 = std::numeric_limits<int64_t>::max() / 4;
+    constexpr int64_t INF_ENERGY = 1000000000LL;
 
-struct Point {
-    double x = 0.0;
-    double y = 0.0;
-};
+    struct Point
+    {
+        double x = 0.0;
+        double y = 0.0;
+    };
 
-struct Instance {
-    // Number of real customers. Customers are 1..n.
-    // Depot is 0. Dummy end depot is n + 1.
-    int n = 0;
+    struct Instance
+    {
+        // Real customers: 1..n. Start depot: 0. Dummy end depot: n+1.
+        int n = 0;
+        int n_drones = 1;
+        int start_depot = 0;
+        int end_depot = 0;
 
-    int n_drones = 1;
-    int start_depot = 0;
-    int end_depot = 0;
+        double drone_cap = 0.0;
+        double truck_speed = 0.0;
+        double drone_speed = 0.0;
 
-    double drone_cap = 0.0;
-    double truck_speed = 0.0;
-    double drone_speed = 0.0;
+        int64_t battery_capacity = 928;
+        int64_t swap_time = 0; // seconds
 
-    int64_t battery_capacity = 928;
-    int64_t swap_time = 0;  // seconds
+        std::vector<Point> coords;
+        std::vector<double> demand;
+        std::vector<std::vector<int64_t>> truck_time;
+        std::vector<std::vector<int64_t>> drone_time;
+        std::vector<int64_t> energy;
+        std::vector<bool> drone_feasible;
 
-    // Indexed by node id. Size should be n + 2: 0..n+1.
-    std::vector<Point> coords;
-    std::vector<double> demand;
+        int NumNodes() const { return n + 2; }
 
-    // Integer travel times, in seconds.
-    std::vector<std::vector<int64_t>> truck_time;
-    std::vector<std::vector<int64_t>> drone_time;
-
-    // energy[i] for customer i. energy[0] and energy[end_depot] are 0.
-    std::vector<int64_t> energy;
-
-    // drone_feasible[i] indicates customer i can be served by drone.
-    std::vector<bool> drone_feasible;
-
-    int NumNodes() const {
-        return n + 2;
-    }
-
-    std::vector<Node> Customers() const {
-        std::vector<Node> customers;
-        for (int i = 1; i <= n; ++i) {
-            customers.push_back(i);
+        std::vector<Node> Customers() const
+        {
+            std::vector<Node> c;
+            for (int i = 1; i <= n; ++i)
+                c.push_back(i);
+            return c;
         }
-        return customers;
-    }
 
-    std::vector<Node> DroneCustomers() const {
-        std::vector<Node> customers;
-        for (int i = 1; i <= n; ++i) {
-            if (drone_feasible[i]) {
-                customers.push_back(i);
-            }
+        std::vector<Node> DroneCustomers() const
+        {
+            std::vector<Node> c;
+            for (int i = 1; i <= n; ++i)
+                if (drone_feasible[i])
+                    c.push_back(i);
+            return c;
         }
-        return customers;
+
+        int64_t DroneRoundTripTime(Node i) const
+        {
+            return drone_time[start_depot][i] + drone_time[i][start_depot];
+        }
+    };
+
+    enum class CPStatus
+    {
+        Optimal,
+        Feasible,
+        Infeasible,
+        Unknown,
+        ModelInvalid
+    };
+
+    inline const char *CPStatusName(CPStatus s)
+    {
+        switch (s)
+        {
+        case CPStatus::Optimal:
+            return "OPTIMAL";
+        case CPStatus::Feasible:
+            return "FEASIBLE";
+        case CPStatus::Infeasible:
+            return "INFEASIBLE";
+        case CPStatus::Unknown:
+            return "UNKNOWN";
+        case CPStatus::ModelInvalid:
+            return "MODEL_INVALID";
+        }
+        return "UNKNOWN";
     }
 
-    int64_t DroneRoundTripTime(Node i) const {
-        return drone_time[start_depot][i] + drone_time[i][start_depot];
-    }
-};
+    struct CPResult
+    {
+        CPStatus status = CPStatus::Unknown;
+        bool feasible = false;     // A concrete feasible schedule exists.
+        bool optimal = false;      // An optimization objective is proved optimal.
+        bool is_decision = false;  // Deadline decision rather than optimization.
+        int64_t objective = INF64; // Makespan of a feasible schedule, NOT an LB.
+        int64_t lower_bound = 0;   // Certified optimization LB (integer seconds).
+        double wall_time = 0.0;
 
-struct CPResult {
-    bool feasible = false;
-    bool optimal = false;
-    int64_t objective = INF64;
-    double wall_time = 0.0;
+        // Each chain is one drone's ordered depot-to-customer roundtrips.
+        std::vector<std::vector<Node>> chains;
+        // swap_before[k][p] = 1 if swap occurs before chains[k][p].
+        std::vector<std::vector<int>> swap_before;
+    };
 
-    // Decoded anonymous drone chains.
-    // chains[k][p] is the p-th customer served by anonymous drone chain k.
-    //
-    // Example:
-    //   chains[0] = {5, 30, 21, 7}
-    // means anonymous drone chain 0 performs:
-    //   0 -> 5 -> 0, then 0 -> 30 -> 0, then ...
-    std::vector<std::vector<Node>> chains;
+    struct MasterSolution
+    {
+        bool feasible = false;
+        double z = 0.0;
+        double z_truck = 0.0;
+        double z_drone = 0.0;
+        std::vector<int> y;
+        std::vector<std::vector<int>> x_truck;
+    };
 
-    // Battery swap decisions decoded from CP variable s_i.
-    //
-    // swap_before[k][p] = 1 if a battery swap is performed immediately
-    // before serving chains[k][p].
-    //
-    // Interpretation:
-    //   if chains[k][p] = i and swap_before[k][p] = 1,
-    //   then the printed schedule should show:
-    //
-    //       [SWAP] 0 -> i -> 0
-    //
-    // The first customer of a chain should normally have swap_before = 0
-    // because the drone starts the chain with a full battery.
-    std::vector<std::vector<int>> swap_before;
-};
-
-struct MasterSolution {
-    bool feasible = false;
-    double z = 0.0;
-    double z_truck = 0.0;
-    double z_drone = 0.0;
-
-    // y[i] = 1 if customer i is assigned to drone, 0 otherwise.
-    std::vector<int> y;
-
-    // x_truck[i][j] = 1 if truck arc i -> j is selected.
-    std::vector<std::vector<int>> x_truck;
-};
-
-}  // namespace bbcp
-
-#endif
+} // namespace bbcp
+#endif // BBCP_TYPES_H

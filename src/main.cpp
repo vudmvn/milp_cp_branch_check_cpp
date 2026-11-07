@@ -73,6 +73,28 @@ int main(int argc, char** argv) {
         master_options.result_file = argv[7];
     }
 
+    if (argc >= 9) {
+        std::string strat = argv[8];
+        for (char &c : strat) {
+            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        }
+        if (strat == "baseline" || strat == "none" || strat == "off") {
+            master_options.use_bpp_lb = false;
+            master_options.use_incumbent_cutoff = false;
+        } else if (strat == "bpp") {
+            master_options.use_bpp_lb = true;
+            master_options.use_incumbent_cutoff = false;
+        } else if (strat == "cutoff") {
+            master_options.use_bpp_lb = false;
+            master_options.use_incumbent_cutoff = true;
+        } else if (strat == "all" || strat == "bpp+cutoff" || strat == "both") {
+            master_options.use_bpp_lb = true;
+            master_options.use_incumbent_cutoff = true;
+        } else {
+            std::cerr << "Warning: Unknown strategy '" << argv[8] << "'. Using default (all).\n";
+        }
+    }
+
     master_options.verbose = true;
     master_options.cut_verbose = false;
     master_options.cp_options.log_search = false;

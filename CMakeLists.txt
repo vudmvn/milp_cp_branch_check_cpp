@@ -41,7 +41,7 @@ add_executable(milp_cp_solver
 # Adjust gurobi library name if your installed version differs.
 # Common examples: gurobi110, gurobi1103, gurobi120
 find_library(GUROBI_LIB
-    NAMES gurobi120 gurobi110 gurobi1103 gurobi100
+    NAMES gurobi130 gurobi120 gurobi110 gurobi1103 gurobi100
     PATHS ${GUROBI_LIB_DIR}
     REQUIRED
 )
