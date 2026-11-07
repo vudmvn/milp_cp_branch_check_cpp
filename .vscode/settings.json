@@ -1,0 +1,14 @@
+{
+  "cmake.configureOnOpen": true,
+  "cmake.buildDirectory": "${workspaceFolder}/build",
+  "terminal.integrated.env.linux": {
+    "GUROBI_HOME": "/home/orlab/gurobi1301/linux64",
+    "GRB_LICENSE_FILE": "/home/orlab/gurobi_license.lic",
+    "LD_LIBRARY_PATH": "/home/orlab/gurobi1301/linux64/lib:${env:LD_LIBRARY_PATH}"
+  },
+  "C_Cpp.default.configurationProvider": "ms-vscode.cmake-tools",
+  "C_Cpp.default.includePath": [
+    "${workspaceFolder}/**",
+    "/home/orlab/gurobi1301/linux64/include"
+  ]
+}

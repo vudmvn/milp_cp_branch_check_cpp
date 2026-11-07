@@ -1,0 +1,379 @@
+\documentclass[12pt,a4paper]{article}
+
+% =========================================================
+% Preamble cho pdflatex + tiếng Việt
+% =========================================================
+\usepackage[utf8]{inputenc}
+\usepackage[T5]{fontenc}
+\usepackage[vietnamese]{babel}
+\usepackage{lmodern}
+\usepackage{geometry}
+\geometry{left=2.5cm,right=2.2cm,top=2.5cm,bottom=2.5cm}
+
+\usepackage{amsmath,amssymb,amsfonts,amsthm}
+\usepackage{mathtools}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{enumitem}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{float}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue,
+    citecolor=blue,
+    urlcolor=blue
+}
+
+\setlength{\parskip}{0.45em}
+\setlength{\parindent}{0pt}
+
+\newtheorem{definition}{Định nghĩa}
+\newtheorem{proposition}{Mệnh đề}
+\newtheorem{theorem}{Định lý}
+\newtheorem{lemma}{Bổ đề}
+\newtheorem{remark}{Nhận xét}
+\newtheorem{corollary}{Hệ quả}
+
+\newcommand{\C}{\mathcal{C}}
+\newcommand{\CD}{\mathcal{C}^{D}}
+\newcommand{\A}{\mathcal{A}}
+\newcommand{\V}{\mathcal{V}}
+\newcommand{\UB}{\mathrm{UB}}
+\newcommand{\LB}{\mathrm{LB}}
+\newcommand{\swap}{\tau_{\mathrm{swap}}}
+
+\title{\textbf{Tài Liệu Kỹ Thuật: Khung Thuật Toán MILP Master -- CP Subproblem (PDSTSP-BS) và Đề Xuất Phát Triển Các Lát Cắt Benders Mới}}
+\author{\textbf{Nhóm Nghiên Cứu Hệ Thống Định Tuyến Truck--Drone}}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Tài liệu này hệ thống hóa mô hình toán học và cấu trúc giải thuật phân rã \emph{Logic-Based Benders Decomposition} (LBBD) kết hợp trong cây nhánh cận (\emph{Branch-and-Cut}) cho bài toán người giao hàng kết hợp xe tải và phi đội drone song song có hỗ trợ đổi pin tại trạm (Parallel Drone Scheduling Traveling Salesman Problem with Battery Swapping -- PDSTSP-BS). Đặc biệt, tài liệu đi sâu vào phân tích điểm nghẽn của các lát cắt cơ bản hiện có (Point-Specific No-Good Feasibility Cut và Hamming Optimality Cut với Big-$M$), từ đó xây dựng các công thức lát cắt tăng cường: \emph{Subgradient/Lipschitz LBBD Optimality Cut}, \emph{Critical Chain Cut}, và \emph{Minimal Unsatisfiable Core Feasibility Cut} kèm theo chứng minh toán học và mã nguồn cài đặt minh họa trên Gurobi C++ và Google OR-Tools CP-SAT C++.
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+% =========================================================
+\section{Mô tả bài toán gốc (PDSTSP-BS)}
+\label{sec:problem-description}
+% =========================================================
+
+Xét bài toán giao nhận gồm một xe tải (\emph{truck}) và một phi đội gồm $K$ máy bay không người lái (\emph{drone}) hoạt động song song từ trạm trung tâm (\emph{depot}).
+\begin{itemize}[leftmargin=2em]
+    \item Tập khách hàng cần phục vụ được ký hiệu là $\C = \{1, 2, \dots, n\}$.
+    \item Depot xuất phát là đỉnh $0$, và depot kết thúc giả định là đỉnh $n+1$. Tập đỉnh đầy đủ là $\V = \{0\} \cup \C \cup \{n+1\}$.
+    \item Mỗi khách hàng $i \in \C$ phải được phục vụ đúng một lần, hoặc bởi xe tải, hoặc bởi drone.
+\end{itemize}
+
+\paragraph{Đặc tính vận hành của xe tải:}
+Xe tải xuất phát từ đỉnh $0$, di chuyển theo khoảng cách Manhattan giữa các khách hàng được chỉ định theo tuyến đơn và kết thúc tại đỉnh $n+1$. Thời gian di chuyển giữa hai đỉnh $i, j \in \V$ là $\tau^T_{ij}$.
+
+\paragraph{Đặc tính vận hành của drone:}
+Mỗi nhiệm vụ của drone là một chuyến bay độc lập (\emph{sortie}) khứ hồi dạng $0 \to i \to 0$ theo khoảng cách Euclid. Thời gian bay khứ hồi là $r_i = \tau^D_{0i} + \tau^D_{i0}$, và mức năng lượng tiêu thụ tương ứng là $e_i$. Drone có dung lượng pin tối đa là $B$. Khách hàng $i$ chỉ khả thi cho drone ($i \in \CD \subseteq \C$) nếu khối lượng hàng không vượt tải trọng cho phép $w_i \le Q_{\text{drone}}$ và năng lượng khứ hồi thỏa mãn $e_i \le B$.
+
+Mỗi drone có thể thực hiện một chuỗi các sortie liên tiếp (\emph{drone chain}):
+\[
+    0 \to i_1 \to 0 \;|\; 0 \to i_2 \to 0 \;|\; [\mathrm{SWAP}] \; 0 \to i_3 \to 0.
+\]
+Ký hiệu $[\mathrm{SWAP}]$ thể hiện thao tác đổi pin tại depot trước khi thực hiện sortie tiếp theo. Thời gian cho mỗi lần đổi pin là hằng số $\swap$. Sau khi đổi pin, mức pin khả dụng được phục hồi về dung lượng tối đa $B$.
+
+\paragraph{Mục tiêu tối ưu:}
+Tối thiểu hóa thời điểm hoàn thành của toàn bộ hệ thống (\emph{Min Makespan}):
+\begin{equation}
+    \min z = \max\{T_{\mathrm{truck}}, T_{\mathrm{drone}}\},
+    \label{eq:objective-orig}
+\end{equation}
+trong đó $T_{\mathrm{truck}}$ là tổng thời gian di chuyển của xe tải, còn $T_{\mathrm{drone}}$ là makespan lớn nhất trong số các chuỗi hành trình của $K$ drone.
+
+% =========================================================
+\section{Khung giải thuật phân rã LBBD: Master MILP và Subproblem CP}
+\label{sec:decomposition-framework}
+% =========================================================
+
+\subsection{Bài toán chính (Master Problem -- Gurobi MILP)}
+
+Bài toán Master giải quyết bài toán phân chia khách hàng, định tuyến xe tải và ước lượng cận dưới cho drone.
+
+\paragraph{Biến quyết định:}
+\begin{itemize}[leftmargin=2em]
+    \item $y_i \in \{0, 1\}$: bằng $1$ nếu khách hàng $i$ được gán cho drone, $0$ nếu ngược lại.
+    \item $t_i \in \{0, 1\}$: bằng $1$ nếu khách hàng $i$ được gán cho xe tải, $0$ nếu ngược lại.
+    \item $x_{ij} \in \{0, 1\}$: bằng $1$ nếu xe tải đi trực tiếp từ $i$ đến $j$ trên tập cung $\A = \{(i,j) \in \V \times \V: i \neq j, i \neq n+1, j \neq 0\}$.
+    \item $q \in \mathbb{Z}_+$: biến nguyên cận dưới số lần đổi pin toàn hệ thống.
+    \item $z_T, z_D, z \ge 0$: lần lượt biểu diễn thời gian xe tải, cận dưới makespan drone và makespan toàn cục.
+\end{itemize}
+
+\paragraph{Mô hình Master MILP:}
+\begin{align}
+    \min \quad & z \label{eq:master-obj}\\
+    \text{s.t.} \quad & y_i + t_i = 1, && \forall i \in \C \label{eq:master-assign}\\
+    & y_i = 0, \quad t_i = 1, && \forall i \in \C \setminus \CD \label{eq:master-drone-infeasible}\\
+    & \sum_{j:(0,j)\in \A} x_{0j} = 1, \quad \sum_{i:(i,n+1)\in \A} x_{i,n+1} = 1 \label{eq:master-depot-deg}\\
+    & \sum_{j:(j,i)\in \A} x_{ji} = t_i, \quad \sum_{j:(i,j)\in \A} x_{ij} = t_i, && \forall i \in \C \label{eq:master-cust-deg}\\
+    & z_T \ge \sum_{(i,j)\in \A} \tau^T_{ij} x_{ij} \label{eq:master-zt}\\
+    & z_D \ge r_i y_i, && \forall i \in \CD \label{eq:master-zd-single}\\
+    & K z_D \ge \sum_{i \in \CD} r_i y_i + \swap q \label{eq:master-zd-workload}\\
+    & B(K + q) \ge \sum_{i \in \CD} e_i y_i \label{eq:master-zd-energy}\\
+    & z \ge z_T, \quad z \ge z_D \label{eq:master-z-link}
+\end{align}
+
+\paragraph{Khử chu trình con xe tải (Subtour Elimination):}
+Hệ thống hỗ trợ 2 chế độ:
+\begin{enumerate}[leftmargin=2em]
+    \item \textbf{LazyCut mode} (\emph{khuyến nghị}): Không thêm ràng buộc thứ tự trong Master. Khi callback \texttt{GRB\_CB\_MIPSOL} phát hiện chu trình con tách rời depot $Q \subset \C$, bổ sung lazy cut:
+    \begin{equation}
+        \sum_{i \in Q} \sum_{j \in Q, j \neq i} x_{ij} \le |Q| - 1.
+        \label{eq:subtour-cut}
+    \end{equation}
+    \item \textbf{MTZ mode}: Sử dụng biến thứ tự $u_i \in [1, n]$ và ràng buộc Miller-Tucker-Zemlin trực tiếp trong Master: $u_j \ge u_i + 1 - n(1 - x_{ij})$.
+\end{enumerate}
+
+\subsection{Bài toán con (Subproblem -- Google OR-Tools CP-SAT)}
+
+Tại mỗi nghiệm nguyên Master $\bar{y}$, tập khách gán cho drone là $\bar{D} = \{i \in \C \mid \bar{y}_i = 1\}$. Ký hiệu $m = |\bar{D}|$. CP Subproblem xếp lịch $m$ khách hàng này vào $K$ drone ẩn danh nhằm cực tiểu hóa makespan drone:
+\[
+    \phi(\bar{y}) = \min z_{\mathrm{drone}}.
+\]
+Các biến trong mô hình CP gồm:
+\begin{itemize}[leftmargin=2em]
+    \item $h_i \in \{0, 1\}$: khách $i$ là đỉnh bắt đầu chuỗi (\emph{chain head}).
+    \item $u_{ij} \in \{0, 1\}$: khách $j$ được phục vụ ngay sau khách $i$ bởi cùng 1 drone.
+    \item $s_i \in \{0, 1\}$: thực hiện đổi pin ngay trước khi phục vụ khách $i$.
+    \item $start_i, end_i, size_i \in [0, \text{horizon}]$: thời điểm bắt đầu, kết thúc và độ dài chuyến bay của $i$. Trong đó:
+    \begin{equation}
+        size_i = r_i + \swap \cdot s_i, \qquad end_i = start_i + size_i.
+    \end{equation}
+    \item $battery_i \in [0, B]$: lượng pin còn lại ngay trước khi thực hiện sortie phục vụ $i$.
+    \item $order_i \in [1, m]$: thứ tự topo khử chu trình cục bộ.
+\end{itemize}
+
+\paragraph{Ràng buộc phá đối xứng và tăng tốc CP:}
+\begin{align}
+    & \sum_{i \in \bar{D}} h_i = H = \min\{K, m\} \label{eq:cp-tight-heads}\\
+    & \sum_{i \neq j} u_{ij} = m - H \label{eq:cp-tight-arcs}\\
+    & h_i = 1 \implies order_i = 1, \qquad h_i = 0 \implies order_i \ge 2 \label{eq:cp-order-tight}\\
+    & u_{ij} \le s_j, \quad \forall i, j \in \bar{D}, \; i > j \label{eq:cp-symm-order}\\
+    & (H + \sum_{i \in \bar{D}} s_i) B \ge \sum_{i \in \bar{D}} e_i \label{eq:cp-agg-energy}
+\end{align}
+
+% =========================================================
+\section{Phân tích hạn chế của các lát cắt cơ bản hiện có}
+\label{sec:baseline-cuts-limitation}
+% =========================================================
+
+Trong phiên bản khung cơ sở (\texttt{MasterProblem.cpp}), hai loại cuts được sử dụng trong callback \texttt{GRB\_CB\_MIPSOL} gồm:
+
+\subsection{Lát cắt khả thi cơ bản (Baseline No-Good Cut)}
+Nếu bài toán con CP vô nghiệm (\emph{infeasible}) với tập $\bar{D}$, callback thêm:
+\begin{equation}
+    \sum_{i \in \bar{D}} y_i \le |\bar{D}| - 1.
+    \label{eq:baseline-nogood}
+\end{equation}
+\paragraph{Điểm nghẽn:} Bất đẳng thức \eqref{eq:baseline-nogood} chỉ cấm duy nhất cấu hình chính xác của tập $\bar{D}$. Nếu nguyên nhân vô nghiệm thực chất chỉ do một tập con xung đột nhỏ $S \subset \bar{D}$ (ví dụ 3 khách hàng có tổng thời gian/năng lượng quá lớn), thì Master vẫn sẽ tốn công duyệt qua toàn bộ $2^{|\bar{D}| - |S|}$ tổ hợp con khác chứa $S$.
+
+\subsection{Lát cắt tối ưu cơ bản (Baseline Hamming Optimality Cut)}
+Nếu CP khả thi nhưng giá trị makespan thực tế $\phi(\bar{y}) = \max\{T(\bar{x}), z_{\mathrm{drone}}\} > z_{\mathrm{master}}$, callback thêm:
+\begin{equation}
+    z + M \left(\sum_{i \in \bar{D}} (1 - y_i) + \sum_{i \notin \bar{D}} y_i\right) \ge \phi(\bar{y}),
+    \label{eq:baseline-optimality}
+\end{equation}
+với hằng số Big-$M = 10^7$.
+\paragraph{Điểm nghẽn:}
+\begin{enumerate}[leftmargin=2em]
+    \item \textbf{Big-$M$ triệt tiêu hoàn toàn tác dụng chặn dưới:} Chỉ cần đúng $1$ khách hàng thay đổi gán (ví dụ chuyển từ drone sang truck), khoảng cách Hamming $\ge 1$, vế trái lập tức có thêm $10^7$. Khi đó bất đẳng thức $z + 10^7 \ge \phi(\bar{y})$ trở nên thừa thãi và không cung cấp bất kỳ cận dưới nào cho bất kỳ nghiệm lân cận nào.
+    \item \textbf{Vi phạm tính chất đơn điệu:} Thành phần $\sum_{i \notin \bar{D}} y_i$ phạt trường hợp Master gán thêm khách hàng cho drone. Tuy nhiên, trong bài toán điều độ máy song song, việc giao thêm việc cho drone không thể làm giảm makespan. Do đó, việc nới lỏng cận khi có thêm khách hàng mới là không hợp lý.
+\end{enumerate}
+
+% =========================================================
+\section{Đề xuất phát triển các lát cắt tăng cường (Advanced Cuts)}
+\label{sec:advanced-cuts}
+% =========================================================
+
+\subsection{Cải tiến Optimality Cut: Subgradient / Lipschitz-bounding Cut}
+
+\begin{theorem}[Tính đơn điệu của Drone Subproblem]
+Gọi $\phi(D)$ là makespan tối ưu khi phục vụ tập khách hàng drone $D$. Với mọi $D' \subseteq D$, ta luôn có:
+\begin{equation}
+    \phi(D') \le \phi(D).
+\end{equation}
+\end{theorem}
+\begin{proof}
+Mọi lịch trình drone khả thi cho tập khách hàng $D$ đều có thể chuyển thành lịch trình khả thi cho tập con $D'$ bằng cách xóa bỏ các sortie phục vụ các khách hàng $k \in D \setminus D'$. Việc xóa bỏ sortie không làm tăng thời điểm hoàn thành của bất kỳ drone nào. Do đó, makespan tối ưu của $D'$ không thể vượt quá makespan tối ưu của $D$.
+\end{proof}
+
+\begin{theorem}[Lát cắt Subgradient LBBD Optimality Cut]
+\label{thm:subgradient-cut}
+Cho $\bar{y}$ là nghiệm nguyên của Master, $\bar{D} = \{i \in \C \mid \bar{y}_i = 1\}$ và $\phi(\bar{y})$ là makespan hợp lệ trả về từ CP Subproblem. Khi đó, bất đẳng thức sau đây là một lát cắt Benders hợp lệ:
+\begin{equation}
+    z \ge \phi(\bar{y}) - \sum_{i \in \bar{D}} \Delta_i (1 - y_i),
+    \label{eq:strong-optimality-cut}
+\end{equation}
+trong đó hệ số giảm cận tối đa được định nghĩa an toàn là:
+\begin{equation}
+    \Delta_i = r_i + \swap.
+    \label{eq:delta-def}
+\end{equation}
+\end{theorem}
+
+\begin{proof}
+Xét một nghiệm gán bất kỳ $y \in \{0, 1\}^n$ với tập khách gán cho drone là $D = \{i \in \C \mid y_i = 1\}$. Ta cần chứng minh:
+\[
+    \phi(D) \ge \phi(\bar{y}) - \sum_{i \in \bar{D} \setminus D} \Delta_i.
+\]
+Đặt $D_{\cap} = D \cap \bar{D}$. Theo tính đơn điệu, ta có $\phi(D) \ge \phi(D_{\cap})$. 
+
+Xét lịch trình tối ưu của tập $\bar{D}$ có makespan $\phi(\bar{y})$. Ta thu được một lịch trình khả thi cho $D_{\cap}$ bằng cách loại bỏ lần lượt từng khách hàng $i \in \bar{D} \setminus D_{\cap}$. Khi loại bỏ khách hàng $i$, thời gian của chuỗi chứa $i$ giảm đi một lượng đúng bằng thời gian của sortie $r_i$ cộng với tối đa một lần đổi pin $\swap$. Do đó:
+\[
+    \phi(D_{\cap}) \ge \phi(\bar{y}) - \sum_{i \in \bar{D} \setminus D_{\cap}} (r_i + \swap).
+\]
+Nhận thấy rằng với $i \in \bar{D}$, biểu thức $(1 - y_i)$ bằng $1$ nếu $i \in \bar{D} \setminus D$, và bằng $0$ nếu $i \in \bar{D} \cap D$. Từ đó suy ra:
+\[
+    z \ge \phi(D) \ge \phi(\bar{y}) - \sum_{i \in \bar{D}} \Delta_i (1 - y_i).
+\]
+Bất đẳng thức hoàn toàn hợp lệ và không làm loại bỏ bất kỳ nghiệm khả thi nào của bài toán gốc.
+\end{proof}
+
+\begin{remark}[Ưu điểm vượt trội của Cut mới]
+\begin{itemize}[leftmargin=2em]
+    \item \textbf{Loại bỏ Big-$M$}: Hệ số $\Delta_i$ có độ lớn vật lý thực tế (vài trăm giây thay vì $10^7$).
+    \item \textbf{Cung cấp cận dưới có ý nghĩa cho vùng lân cận}: Nếu Master chỉ thay đổi một khách hàng $k$ có thời gian bay ngắn ($r_k = 200s$), vế phải của bất đẳng thức vẫn giữ nguyên cận dưới $\phi(\bar{y}) - (200 + \swap)$, ngăn chặn Master duyệt qua các nghiệm lân cận có giá trị mục tiêu thấp giả định.
+    \item \textbf{Tương thích với tính đơn điệu}: Khi Master gán thêm khách hàng cho drone ($y_j = 1$ với $j \notin \bar{D}$), không có số hạng nào làm suy yếu vế phải.
+\end{itemize}
+\end{remark}
+
+\subsection{Cải tiến No-Good Cut: Trích xuất Unsatisfiable Core (UNSAT Core)}
+
+Thay vì loại bỏ toàn bộ tập $\bar{D}$, ta tìm một tập con mâu thuẫn tối thiểu $S^* \subseteq \bar{D}$ sao cho bản thân $S^*$ đã không thể tìm được lịch trình khả thi.
+
+\begin{proposition}[Lát cắt Minimal No-Good Cut]
+Nếu tập con khách hàng $S^* \subseteq \bar{D}$ không tồn tại bất kỳ lịch trình drone khả thi nào thỏa mãn các điều kiện kỹ thuật, thì bất đẳng thức sau là hợp lệ:
+\begin{equation}
+    \sum_{i \in S^*} y_i \le |S^*| - 1.
+    \label{eq:minimal-nogood}
+\end{equation}
+\end{proposition}
+
+\paragraph{Thuật toán 1: Trích xuất trực tiếp qua Assumptions trong OR-Tools CP-SAT}
+Trong OR-Tools CP-SAT, mỗi khách hàng $i \in \bar{D}$ được gắn kèm một biến chỉ thị giả định Boolean $a_i \in \{0, 1\}$. Khi giải mô hình với tập giả định $\mathcal{A} = \{a_i \mid i \in \bar{D}\}$, nếu bộ giải trả về \texttt{INFEASIBLE}, ta gọi hàm:
+\[
+    S^* = \text{\texttt{response.sufficient\_assumptions\_for\_infeasibility()}}.
+\]
+Engine SAT sẽ dựa trên đồ thị xung đột (\emph{conflict graph}) để trả về tập $S^*$ nhỏ nhất gây ra mâu thuẫn trong thời gian tính bằng mili-giây.
+
+\paragraph{Thuật toán 2: Thuật toán lọc Deletion Filter (QuickXplain)}
+Trong trường hợp không dùng cơ chế Assumptions, ta sử dụng thuật toán Deletion Filter:
+\begin{algorithm}[H]
+\caption{Thuật toán Deletion Filter tìm 1-Minimal Infeasible Set}
+\label{alg:deletion-filter}
+\begin{algorithmic}[1]
+\Require Tập khách hàng ban đầu $\bar{D}$ gây vô nghiệm trên CP.
+\Ensure Tập con mâu thuẫn tối thiểu $S^* \subseteq \bar{D}$.
+\State Khởi tạo $S \leftarrow \bar{D}$
+\For{mỗi khách hàng $i \in \bar{D}$}
+    \State Gọi CP giải bài toán với tập khách $S \setminus \{i\}$
+    \If{CP trả về \texttt{INFEASIBLE}}
+        \State $S \leftarrow S \setminus \{i\}$ \Comment{Khách $i$ không phải nguyên nhân duy nhất, có thể loại bỏ}
+    \Else
+        \State Giữ lại $i$ trong $S$ \Comment{Khách $i$ là thành phần cốt lõi gây vô nghiệm}
+    \EndIf
+\EndFor
+\State \Return $S^* = S$
+\end{algorithmic}
+\end{algorithm}
+
+% =========================================================
+\section{Bảng so sánh tổng hợp}
+\label{sec:comparison}
+% =========================================================
+
+\begin{table}[H]
+\centering
+\small
+\renewcommand{\arraystretch}{1.3}
+\caption{So sánh giữa các lát cắt cơ bản và lát cắt đề xuất cải tiến}
+\label{tab:comparison}
+\begin{tabular}{p{3.2cm} p{5.5cm} p{6.8cm}}
+\toprule
+\textbf{Thành phần} & \textbf{Phiên bản cơ sở (Baseline)} & \textbf{Phiên bản đề xuất (Advanced)} \\
+\midrule
+\textbf{Optimality Cut} & $z + 10^7 \cdot \text{Hamming}(y, \bar{y}) \ge \phi(\bar{y})$ & $z \ge \phi(\bar{y}) - \sum_{i \in \bar{D}} (r_i + \swap)(1 - y_i)$ \\
+\textbf{Hệ số chặn} & Big-$M = 10^7$ (vô hiệu hóa tức thì) & $\Delta_i = r_i + \swap$ (mang ý nghĩa vật lý) \\
+\textbf{Phạm vi cắt} & Chỉ cắt đúng $1$ điểm nghiệm duy nhất & Cắt toàn bộ một siêu mặt lân cận nghiệm \\
+\textbf{Tính đơn điệu} & Bị phá vỡ bởi $\sum_{j \notin \bar{D}} y_j$ & Bảo toàn hoàn hảo tính đơn điệu \\
+\midrule
+\textbf{No-Good Cut} & $\sum_{i \in \bar{D}} y_i \le |\bar{D}| - 1$ & $\sum_{i \in S^*} y_i \le |S^*| - 1$ với $S^* \subseteq \bar{D}$ \\
+\textbf{Không gian bị loại} & Loại duy nhất $1$ nghiệm tổ hợp & Loại bỏ $2^{|\bar{D}| - |S^*|}$ nghiệm nhánh tiềm năng \\
+\textbf{Phương pháp tìm} & Lấy toàn bộ tập gán drone & UNSAT Core (CP-SAT) hoặc Deletion Filter \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+% =========================================================
+\section{Mã nguồn cài đặt minh họa trên C++}
+\label{sec:code-implementation}
+% =========================================================
+
+\subsection{Cài đặt Subgradient Optimality Cut trong Gurobi Callback}
+
+Đoạn mã dưới đây được cập nhật trực tiếp vào lớp \texttt{MasterCallback} trong file \texttt{src/MasterProblem.cpp}:
+
+\begin{verbatim}
+void AddStrongOptimalityCut(const std::vector<Node>& drone_customers, 
+                            double phi) {
+    GRBLinExpr lhs = z_;
+    double rhs = phi;
+
+    for (Node i : drone_customers) {
+        const double delta_i = static_cast<double>(
+            inst_.DroneRoundTripTime(i) + inst_.swap_time
+        );
+        // z >= phi - sum_{i in Dbar} delta_i * (1 - y_i)
+        // <=> z + sum_{i in Dbar} delta_i * (1 - y_i) >= phi
+        lhs += delta_i * (1.0 - y_[i]);
+    }
+
+    addLazy(lhs >= rhs);
+
+    if (options_.cut_verbose) {
+        std::cout << "[STRONG LBBD CUT] Added subgradient optimality cut, phi=" 
+                  << phi << "\n";
+    }
+}
+\end{verbatim}
+
+\subsection{Cài đặt Minimal No-Good Cut}
+
+\begin{verbatim}
+void AddMinimalNoGoodCut(const std::vector<Node>& conflict_set) {
+    if (conflict_set.empty()) return;
+
+    GRBLinExpr lhs = 0.0;
+    for (Node i : conflict_set) {
+        lhs += y_[i];
+    }
+
+    // sum_{i in S*} y_i <= |S*| - 1
+    addLazy(lhs <= static_cast<int>(conflict_set.size()) - 1);
+
+    if (options_.cut_verbose) {
+        std::cout << "[MINIMAL NO-GOOD CUT] Added cut for conflict core size=" 
+                  << conflict_set.size() << "\n";
+    }
+}
+\end{verbatim}
+
+% =========================================================
+\section{Kết luận}
+\label{sec:conclusion}
+% =========================================================
+
+Việc chuyển đổi từ các lát cắt điểm đơn lẻ (Point-specific cuts với Big-$M$) sang các lát cắt phân tích dựa trên tính đơn điệu (Subgradient/Lipschitz LBBD Cuts) và trích xuất hạt nhân mâu thuẫn (UNSAT Core) là bước cải tiến then chốt giúp khung phân rã MILP--CP mở rộng năng lực giải quyết cho các bài toán quy mô lớn ($n \ge 50$). Cận dưới của Master Problem được thắt chặt liên tục qua các nút cây tìm kiếm, giảm thiểu số lần gọi solver CP đắt đỏ và tăng tốc độ hội tụ tổng thể.
+
+\end{document}

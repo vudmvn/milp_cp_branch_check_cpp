@@ -1,0 +1,28 @@
+# Build artifacts
+build/
+bin/
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.dylib
+*.dll
+
+# Executables
+milp_cp_solver
+
+# LaTeX auxiliary files
+*.aux
+*.log
+*.out
+*.toc
+*.synctex.gz
+*.fls
+*.fdb_latexmk
+
+# Editor and OS files
+.DS_Store
+*~
+*.swp
+*.swo

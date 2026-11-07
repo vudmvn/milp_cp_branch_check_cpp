@@ -1,0 +1,17 @@
+{
+	"folders": [
+		{
+			"path": "../../Drone_Battery_Swap/CP-PDSTSP"
+		},
+		{
+			"path": ".."
+		}
+	],
+    "settings": {
+        "terminal.integrated.env.linux": {
+            "GUROBI_HOME": "/home/orlab/gurobi1301/linux64",
+            "GRB_LICENSE_FILE": "/home/orlab/gurobi_license.lic",
+            "LD_LIBRARY_PATH": "/home/orlab/gurobi1301/linux64/lib:${env:LD_LIBRARY_PATH}"
+        }
+    }
+}

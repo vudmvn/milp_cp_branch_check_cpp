@@ -1,0 +1,33 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "type": "shell",
+            "label": "Gurobi_Build_Task",
+            "command": "/usr/bin/g++",
+            "args": [
+                "-std=c++17",
+                "-g",
+                "${file}",
+                "-I/home/orlab/gurobi1301/linux64/include",
+                "-L/home/orlab/gurobi1301/linux64/lib",
+                "-lgurobi_c++",
+                "-lgurobi130",
+                "-o",
+                "${fileDirname}/output/${fileBasenameNoExtension}"
+            ],
+            "options": {
+                "cwd": "${fileDirname}",
+                "env": {
+                    // Chỉ thêm đường dẫn thư viện, KHÔNG ghi đè PATH ở đây để tránh mất 'ld'
+                    "LD_LIBRARY_PATH": "/home/orlab/gurobi1301/linux64/lib:${env:LD_LIBRARY_PATH}"
+                }
+            },
+            "problemMatcher": ["$gcc"],
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            }
+        }
+    ]
+}
