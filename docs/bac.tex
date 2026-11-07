@@ -1,0 +1,758 @@
+\documentclass[11pt,a4paper]{article}
+
+% Compile with pdfLaTeX (not XeLaTeX):
+%   pdflatex -interaction=nonstopmode -halt-on-error PDSTSP_BS_Branch_and_Check_pdflatex.tex
+% Run twice to resolve cross-references and table of contents.
+% UTF-8 Vietnamese text with the T5 (Vietnamese) font encoding.
+\usepackage[utf8]{inputenc}
+\usepackage[T5]{fontenc}
+\usepackage[vietnamese]{babel}
+\usepackage{lmodern}
+\usepackage{geometry}
+\geometry{left=26mm,right=24mm,top=24mm,bottom=25mm}
+\usepackage{amsmath,amssymb,amsthm,mathtools}
+\usepackage{booktabs,array,longtable}
+\usepackage{enumitem}
+\usepackage{graphicx}
+\usepackage{fancyhdr}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{listings}
+\usepackage[protrusion=false]{microtype}
+\usepackage{lastpage}
+
+\definecolor{navy}{HTML}{163B5D}
+\definecolor{softblue}{HTML}{EFF5FA}
+\definecolor{graytext}{HTML}{506070}
+\hypersetup{colorlinks=true,linkcolor=navy,urlcolor=navy,citecolor=navy,
+  pdftitle={PDSTSP-BS: Mathematical Formulation, Branch-and-Check and Strengthening Inequalities},
+  pdfauthor={Tài liệu kỹ thuật - bản hiệu chỉnh}}
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{4.5pt}
+\setlist[itemize]{topsep=2pt,itemsep=2pt,leftmargin=1.8em}
+\setlist[enumerate]{topsep=2pt,itemsep=2pt,leftmargin=1.8em}
+\allowdisplaybreaks[2]
+\emergencystretch=2em
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\footnotesize\sffamily\color{graytext} PDSTSP-BS | MILP--CP Branch-and-Check}
+\fancyhead[R]{\footnotesize\sffamily\color{graytext} Technical implementation notes}
+\fancyfoot[C]{\footnotesize\thepage/\pageref{LastPage}}
+\renewcommand{\headrulewidth}{0.3pt}
+\setlength{\headheight}{15pt}
+
+\theoremstyle{definition}
+\newtheorem{definition}{Định nghĩa}[section]
+\newtheorem{assumption}{Giả thiết}[section]
+\theoremstyle{plain}
+\newtheorem{proposition}{Mệnh đề}[section]
+\newtheorem{lemma}{Bổ đề}[section]
+\newtheorem{theorem}{Định lý}[section]
+\newtheorem{corollary}{Hệ quả}[section]
+\theoremstyle{remark}
+\newtheorem{remark}{Nhận xét}[section]
+
+\newcommand{\C}{\mathcal C}
+\newcommand{\CD}{\mathcal C^D}
+\newcommand{\V}{\mathcal V}
+\newcommand{\A}{\mathcal A}
+\newcommand{\D}{\mathcal D}
+\newcommand{\sw}{\tau_{\mathrm{swap}}}
+\newcommand{\opt}{\phi^*}
+\newcommand{\barD}{\overline D}
+\newcommand{\LB}{\mathrm{LB}}
+\newcommand{\UB}{\mathrm{UB}}
+\DeclareMathOperator{\makespan}{makespan}
+
+\lstdefinestyle{cppsimple}{
+ language=C++,basicstyle=\ttfamily\footnotesize,columns=fullflexible,
+ showstringspaces=false,breaklines=true,frame=single,
+ rulecolor=\color{gray!45},backgroundcolor=\color{softblue},
+ keywordstyle=\color{navy}\bfseries,
+ commentstyle=\color{graytext},
+ xleftmargin=5pt,xrightmargin=5pt,aboveskip=6pt,belowskip=6pt,
+ tabsize=2
+}
+
+\begin{document}
+\begin{center}
+{\sffamily\color{navy}\Large\bfseries PDSTSP-BS: Mô hình và thuật toán\\[3pt]
+MILP--CP Branch-and-Check với các lát cắt làm chặt}\par
+\vspace{6pt}
+{\large\sffamily Mô hình toán học, chứng minh và đối chiếu triển khai C++}\par
+\vspace{5pt}
+{\small Ngày 07 tháng 11 năm 2026}\par
+\end{center}
+\vspace{5pt}
+\begin{abstract}
+Tài liệu trình bày một khung phân rã MILP--CP cho bài toán \emph{Parallel Drone Scheduling Traveling Salesman Problem with Battery Swapping} (PDSTSP-BS). Trọng tâm là các kết quả có thể chứng minh dưới những giả thiết vận hành được nêu tường minh: tính khả thi của mọi tập khách hàng đủ điều kiện phục vụ bằng drone, các cận dưới an toàn của Master, tính đơn điệu của hàm makespan drone, bất đẳng thức chặn mức thay đổi khi bổ sung khách hàng và lát cắt tối ưu \emph{logic-based Benders} không cần hằng số Big-$M$ tùy ý. Tài liệu cũng phân biệt cận dưới được chứng nhận với nghiệm khả thi của CP-SAT, đưa ra điều kiện cần để cơ chế Branch-and-Check giữ tính chính xác, cùng một đoạn mã Gurobi C++ minh họa. Không đưa vào các feasibility cuts hay các phát biểu về hiệu năng chưa có chứng minh hoặc kiểm chứng.
+\end{abstract}
+
+\begingroup
+\small
+\setlength{\parskip}{0pt}
+\tableofcontents
+\endgroup
+\newpage
+
+\section{Bài toán và phạm vi giả thiết}
+\subsection{Tập hợp, tham số và mục tiêu}
+Xét tập khách hàng $\C=\{1,\ldots,n\}$, một xe tải và $K\ge1$ drone cùng hoạt động từ depot. Xe tải đi từ depot xuất phát $0$ đến depot kết thúc $n+1$ (hai bản sao của cùng depot); đặt $\V=\{0\}\cup\C\cup\{n+1\}$. Tập $\CD\subseteq\C$ gồm các khách hàng được phép gán cho drone. Mỗi khách hàng phải được phục vụ đúng một lần bởi xe tải hoặc bởi một drone.
+
+Xe tải di chuyển theo các cung $(i,j)$ với thời gian $\tau^T_{ij}\ge0$ (có thể được tính theo khoảng cách Manhattan). Mỗi khách hàng drone $i$ được phục vụ bằng một sortie khứ hồi $0\to i\to0$ có thời gian $r_i\ge0$ (có thể được tính theo khoảng cách Euclid) và tiêu thụ năng lượng $e_i$. Dung lượng pin mỗi drone là $B>0$, thời gian đổi pin tại depot là $\sw\ge0$. Một khách hàng thuộc $\CD$ phải thỏa $e_i\le B$ và các điều kiện tải trọng.
+
+Ký hiệu $T_T$ là thời gian hoàn thành tuyến xe tải và $T_D$ là thời gian kết thúc muộn nhất trong $K$ lịch trình drone. Mục tiêu là
+\begin{equation}\label{eq:objective}
+\min\ z=\max\{T_T,T_D\}.
+\end{equation}
+
+\subsection{Các giả thiết cốt lõi}
+\begin{assumption}[Cấu trúc sortie]
+Mọi sortie drone đều xuất phát từ depot, phục vụ đúng một khách hàng và trở về depot. Thời gian $r_i$ và năng lượng $e_i$ không phụ thuộc vào thứ tự các sortie hay vào drone thực hiện.
+\end{assumption}
+\begin{assumption}[Đổi pin]
+Mỗi drone bắt đầu với pin đầy $B$. Drone có thể đổi pin tại depot trước một sortie tiếp theo; mỗi lần đổi mất $\sw$ đơn vị thời gian, trả mức pin về $B$. Số lần đổi pin và nguồn pin thay thế không bị giới hạn; không có cạnh tranh tài nguyên đổi pin giữa các drone.
+\end{assumption}
+\begin{assumption}[Không có ràng buộc thời gian bổ sung]
+Không có time windows, deadline, thời gian ngừng hoạt động bắt buộc, giới hạn tổng số sortie, hay giới hạn tổng thời gian riêng của drone ngoài mục tiêu makespan. Việc chèn thêm một sortie ở cuối chuỗi của một drone luôn được phép nếu sortie đó có $e_i\le B$.
+\end{assumption}
+\begin{assumption}[Độc lập xe tải--drone]
+Xe tải và các drone hoạt động song song; không cần đồng bộ launch/recovery trên tuyến xe tải. Các thao tác đổi pin diễn ra tại depot và không làm thay đổi tuyến xe tải.
+\end{assumption}
+
+Các kết quả về tính khả thi, tính đơn điệu và hệ số lát cắt ở các mục sau \textbf{chỉ được khẳng định trong phạm vi những giả thiết trên}. Nếu thêm ràng buộc tài nguyên hoặc thời gian, các chứng minh tương ứng cần được xem xét lại.
+
+\subsection{Định nghĩa chính xác drone subproblem}
+Với $D\subseteq\CD$, một lịch trình drone gồm tối đa $K$ chuỗi có thứ tự, phân hoạch các khách hàng trong $D$. Trong mỗi chuỗi, drone bay từng sortie, trừ năng lượng đã tiêu thụ và có thể đổi pin tại depot khi cần. Với chuỗi $P$, đặt $s(P)$ là số lần đổi pin, và thời gian thực hiện là
+\begin{equation}\label{eq:chain-time}
+T(P)=\sum_{i\in P}r_i+\sw\,s(P).
+\end{equation}
+Các chuỗi trống có thời gian bằng $0$. Ký hiệu
+\begin{equation}\label{eq:phi}
+\opt(D)=\min_{\text{lịch trình khả thi phục vụ }D}
+\ \max_{k=1,\ldots,K} T(P_k),\qquad \opt(\varnothing)=0.
+\end{equation}
+$\opt(D)$ là giá trị \emph{tối ưu} của bài toán drone độc lập; không phải makespan của một nghiệm khả thi bất kỳ do CP-SAT tìm được.
+
+\section{Master MILP là một mô hình thư giãn hợp lệ}
+\subsection{Biến và ràng buộc}
+Đặt $y_i=1$ nếu khách hàng $i$ được giao cho drone, $t_i=1$ nếu giao cho xe tải, và $x_{ij}=1$ nếu xe tải đi trực tiếp từ $i$ đến $j$. Đặt
+\[
+\A=\{(i,j)\in\V\times\V:i\ne j,\ i\ne n+1,\ j\ne0\}.
+\]
+Biến $q\in\mathbb Z_+$ mô tả số lần đổi pin dùng để tạo cận dưới tổng hợp; $z_T,z_D,z\ge0$ là các biến makespan trong Master. Một Master hợp lệ có dạng:
+\begin{align}
+\min\quad &z\label{eq:masterobj}\\
+\text{s.t.}\quad
+& y_i+t_i=1 &&\forall i\in\C,\label{eq:assignment}\\
+& y_i=0 &&\forall i\in\C\setminus\CD,\label{eq:eligibility}\\
+&\sum_{j:(0,j)\in\A}x_{0j}=1,
+&&\sum_{i:(i,n+1)\in\A}x_{i,n+1}=1,\label{eq:depot}\\
+&\sum_{j:(j,i)\in\A}x_{ji}=t_i,
+&&\sum_{j:(i,j)\in\A}x_{ij}=t_i
+&&\forall i\in\C,\label{eq:degree}\\
+&\sum_{i\in Q}\sum_{\substack{j\in Q\\j\ne i}}x_{ij}\le |Q|-1
+&&\forall\varnothing\ne Q\subseteq\C,\label{eq:sec}\\
+& z_T\ge\sum_{(i,j)\in\A}\tau^T_{ij}x_{ij},\label{eq:truck-time}\\
+& z_D\ge r_i y_i &&\forall i\in\CD,\label{eq:single}\\
+& Kz_D\ge\sum_{i\in\CD}r_i y_i+\sw q,\label{eq:workload}\\
+& B(K+q)\ge\sum_{i\in\CD}e_i y_i,\label{eq:energy}\\
+& z\ge z_T,\qquad z\ge z_D,\label{eq:links}\\
+& y_i,t_i,x_{ij}\in\{0,1\},\quad q\in\mathbb Z_+,\quad z_T,z_D,z\ge0.
+\end{align}
+Các SEC \eqref{eq:sec} có thể được thêm theo nhu cầu bằng \emph{lazy constraints}. Điều kiện $t_i=1$ cho khách hàng không đủ điều kiện drone suy ra từ \eqref{eq:assignment}--\eqref{eq:eligibility}. Tuyến truck trống được phép qua cung $(0,n+1)$.
+
+
+\subsection{Diễn giải từng ràng buộc Master ngay cạnh biểu thức}
+\label{subsec:master-meaning}
+\noindent\textit{Cột trái} trình bày biểu thức hoặc dẫn chiếu tới công thức chính thức; \textit{cột phải} giải thích bằng tiếng Việt chính xác điều kiện vận hành mà ràng buộc mô hình hoá. Các ràng buộc dưới đây là những điều kiện cần; riêng các cận drone chưa mô tả đầy đủ lịch trình đổi pin.
+\begingroup
+\small\renewcommand{\arraystretch}{1.33}
+\begin{longtable}{@{}p{0.49\linewidth}p{0.47\linewidth}@{}}
+\caption{Biểu thức toán học và ý nghĩa vận hành của các ràng buộc Master}\label{tab:master-meaning}\\
+\toprule
+\textbf{Biểu thức toán học} & \textbf{Ý nghĩa bằng tiếng Việt}\\\midrule
+\endfirsthead
+\toprule
+\textbf{Biểu thức toán học} & \textbf{Ý nghĩa bằng tiếng Việt (tiếp)}\\\midrule
+\endhead
+\bottomrule
+\endfoot
+$y_i+t_i=1$; $y_i=0$ nếu $i\notin\CD$ \eqref{eq:assignment}--\eqref{eq:eligibility}
+& \textbf{Phân công và điều kiện phục vụ:} mỗi khách chỉ được giao cho \emph{một} phương tiện; khách không đủ điều kiện bay bắt buộc do xe tải phục vụ.\\
+$\displaystyle \sum_{j}x_{0j}=1,\ \sum_i x_{i,n+1}=1$ \eqref{eq:depot}
+& \textbf{Kết nối depot:} xe tải xuất phát đúng một lần từ depot đầu và kết thúc đúng một lần tại depot cuối.\\
+$\displaystyle \sum_{j}x_{ji}=\sum_j x_{ij}=t_i$ \eqref{eq:degree}
+& \textbf{Bậc của khách xe tải:} nếu khách do xe tải phục vụ thì có đúng một cung đi vào và một cung đi ra; nếu phục vụ bằng drone thì không có cung xe tải nào nối vào khách đó.\\
+$\displaystyle \sum_{i\in Q}\sum_{j\in Q\setminus\{i\}}x_{ij}\le|Q|-1$ \eqref{eq:sec}
+& \textbf{Loại chu trình con (SEC):} ngăn xe tải tạo một vòng khép kín giữa các khách hàng mà không gắn với đường từ depot xuất phát tới depot kết thúc.\\
+$\displaystyle z_T\ge\sum_{(i,j)\in\A}\tau^T_{ij}x_{ij}$ \eqref{eq:truck-time}
+& \textbf{Thời gian xe tải:} makespan của riêng xe tải không được nhỏ hơn tổng thời gian trên các cung thuộc tuyến đã chọn.\\
+$\displaystyle z_D\ge r_i y_i$ \eqref{eq:single}
+& \textbf{Cận một sortie:} nếu drone phục vụ khách $i$ thì makespan của toàn đội drone ít nhất bằng thời gian khứ hồi phục vụ khách đó.\\
+$\displaystyle Kz_D\ge\sum_i r_i y_i+\sw q$ \eqref{eq:workload}
+& \textbf{Cận tải công việc:} $K$ drone chỉ có tổng cộng tối đa $Kz_D$ đơn vị thời gian làm việc trước mốc $z_D$; phần công việc gồm thời gian bay và thời gian đổi pin được tính bởi $q$.\\
+$\displaystyle B(K+q)\ge\sum_i e_i y_i$ \eqref{eq:energy}
+& \textbf{Cận năng lượng tổng hợp:} $K$ pin đầy ban đầu và $q$ lượt đổi pin chỉ tạo ra tổng tối đa $B(K+q)$ đơn vị năng lượng khả dụng. BĐT chưa kiểm tra việc phân bố sortie vào từng pin.\\
+$z\ge z_T,\quad z\ge z_D$ \eqref{eq:links}
+& \textbf{Makespan toàn hệ thống:} thời điểm hoàn thành chung phải không nhỏ hơn thời gian kết thúc của xe tải hoặc drone.\\
+\end{longtable}
+\endgroup
+
+\subsection{Chứng minh tính hợp lệ của các ràng buộc drone}
+\begin{proposition}[Master không loại bỏ nghiệm gốc]\label{prop:mastervalid}
+Mỗi lịch trình khả thi của PDSTSP-BS theo các giả thiết ở Mục 1 có thể được ánh xạ thành một nghiệm khả thi của Master với giá trị mục tiêu bằng makespan của lịch trình đó. Do đó, giá trị tối ưu Master là một cận dưới của giá trị tối ưu bài toán gốc.
+\end{proposition}
+\begin{proof}
+Lấy $y,t,x$ từ phân công và tuyến xe tải của lịch trình gốc, đặt $q$ bằng số lần đổi pin thực tế của tất cả drone; đặt $z_T=T_T$, $z_D=T_D$ và $z=\max\{T_T,T_D\}$. Các ràng buộc phân công, degree và SEC hiển nhiên được thỏa.
+
+Mỗi sortie $i$ thuộc một chuỗi drone có thời gian ít nhất $r_i$, nên $T_D\ge r_i$ cho khách hàng được chọn; suy ra \eqref{eq:single}. Tổng thời gian bận của tất cả drone bằng $\sum_{i\in D}r_i+\sw q$, và không vượt quá $KT_D$; suy ra \eqref{eq:workload}. Mỗi drone ban đầu có một pin đầy và mỗi lần đổi pin bổ sung nhiều nhất một lượng năng lượng $B$ khả dụng; tổng năng lượng bay do vậy không vượt $B(K+q)$, chứng minh \eqref{eq:energy}. Các ràng buộc thời gian còn lại đúng theo định nghĩa. Vì vậy Master là một thư giãn hợp lệ.
+\end{proof}
+\begin{remark}[Vai trò của $q$]
+Master không bắt buộc $q$ bằng số lần đổi pin thực tế của một lịch trình drone vì lịch trình chưa được biểu diễn trong Master. $q$ chỉ tham gia vào một thư giãn dựa trên tổng năng lượng và tổng workload; giá trị này có thể thấp hơn số lần đổi pin tối thiểu thực sự.
+\end{remark}
+
+
+\section{Các bất đẳng thức tăng cường cho Master}
+\label{sec:strength}
+Các ràng buộc \eqref{eq:single}--\eqref{eq:energy} khai thác thời gian, workload và dung lượng pin tổng quát nhưng chưa phản ánh sự không thể chia sẻ một battery cycle của các sortie có năng lượng lớn. Phần này phát triển một họ bất đẳng thức \emph{không phụ thuộc nghiệm CP}, có thể thêm ngay khi xây dựng Master.
+
+\subsection{Battery-cycle cardinality inequalities}
+Một \emph{battery cycle} là chuỗi liên tiếp các sortie của cùng drone nằm giữa hai lần đổi pin (hoặc từ đầu lịch trình đến lần đổi pin đầu tiên). Tổng năng lượng trong mỗi cycle không vượt $B$. Mỗi drone có tối đa một cycle ban đầu, và mỗi lần đổi pin tạo thêm đúng một cycle. Do đó tổng số cycle của một lịch trình có $q^{\rm act}$ lần đổi pin không vượt $K+q^{\rm act}$.
+
+Với mỗi số nguyên $p\ge1$, xác định tập khách hàng có năng lượng tương đối cao
+\begin{equation}\label{eq:heavy-set}
+H_p=\left\{i\in\CD:(p+1)e_i>B\right\}.
+\end{equation}
+\begin{proposition}[Bất đẳng thức đếm battery cycles]\label{prop:cycle}
+Với mọi $p\ge1$, Master có thể bổ sung bất đẳng thức
+\begin{equation}\label{eq:cyclecuts}
+\boxed{\qquad p(K+q)\ \ge\ \sum_{i\in H_p}y_i.\qquad}
+\end{equation}
+Các ràng buộc này không loại bỏ nghiệm khả thi của PDSTSP-BS.
+\end{proposition}
+\begin{proof}
+Trong một battery cycle, không thể có $p+1$ khách hàng thuộc $H_p$, bởi năng lượng tổng cộng của chúng lớn hơn $(p+1)B/(p+1)=B$. Vì vậy mỗi cycle chứa tối đa $p$ sortie thuộc $H_p$. Một lịch trình dùng $q^{\rm act}$ lần đổi pin có không quá $K+q^{\rm act}$ cycle, suy ra $\sum_{i\in H_p}y_i\le p(K+q^{\rm act})$. Chọn $q=q^{\rm act}$ trong phép chiếu từ lịch trình gốc sang Master chứng minh rằng ràng buộc \eqref{eq:cyclecuts} không loại bỏ nghiệm gốc.\end{proof}
+
+Trong cài đặt, chọn $p\in\{1,2,3\}$ là một cấu hình ban đầu. Có thể tăng số giá trị $p$ hoặc bỏ những trường hợp $H_p=\varnothing$. Lưu ý không nên khẳng định tất cả các bất đẳng thức là không dư thừa; điều này phụ thuộc phân phối năng lượng của bộ dữ liệu.
+
+\subsection{Một số cận bổ sung mang tính hệ quả}
+Từ \eqref{eq:energy} và $q\ge0$, suy ra số chu kỳ cần thiết không nhỏ hơn
+\begin{equation}
+K+q\ge\left\lceil\frac{\sum_i e_i y_i}{B}\right\rceil.
+\end{equation}
+Kết hợp với \eqref{eq:cyclecuts} cho
+\begin{equation}
+q\ge\max\left\{0,\ \left\lceil\frac{\sum_{i\in H_p}y_i}{p}\right\rceil-K\right\}.
+\end{equation}
+Với hệ số $\sw>0$, các cận dưới về $q$ được truyền qua \eqref{eq:workload} thành cận dưới cho $z_D$. Bất đẳng thức workload và các cycle cuts cùng khai thác $q$ như một \emph{biến thư giãn}, không phải một quyết định lịch trình đã được cố định.
+
+\subsection{Bất đẳng thức ràng buộc giữa drone makespan và công việc bay}
+Cho mọi $D=\{i:y_i=1\}$, không phụ thuộc thứ tự các chuyến bay,
+\begin{equation}\label{eq:lb-work-plain}
+z_D\ge\max_{i\in D}r_i,\qquad
+z_D\ge\frac1K\sum_{i\in D}r_i.
+\end{equation}
+Chúng tương ứng với \eqref{eq:single} và trường hợp bỏ thành phần đổi pin của \eqref{eq:workload}. Không cần thêm lại các ràng buộc trùng lặp vào mã nguồn.
+
+
+\subsection{Các bất đẳng thức làm chặt: biểu thức và ý nghĩa}
+\label{subsec:strength-meaning}
+Bảng~\ref{tab:strength-meaning} làm rõ \emph{vấn đề} mà mỗi bất đẳng thức khai thác. Đặc biệt, họ BĐT battery cycles không chỉ giới hạn tổng năng lượng, mà còn phát hiện các khách tiêu tốn nhiều pin không thể dùng chung một chu kỳ pin.
+\begingroup
+\small\renewcommand{\arraystretch}{1.37}
+\begin{longtable}{@{}p{0.49\linewidth}p{0.47\linewidth}@{}}
+\caption{Các bất đẳng thức hợp lệ/làm chặt trong Master và cách diễn giải}\label{tab:strength-meaning}\\
+\toprule
+\textbf{Biểu thức toán học} & \textbf{Vấn đề được mô tả / tác dụng làm chặt}\\\midrule
+\endfirsthead
+\toprule
+\textbf{Biểu thức toán học} & \textbf{Ý nghĩa (tiếp)}\\\midrule
+\endhead
+\bottomrule
+\endfoot
+$\displaystyle H_p=\{i:(p+1)e_i>B\}$ \eqref{eq:heavy-set}
+& \textbf{Nhận diện khách tiêu thụ nhiều pin:} một chu kỳ pin dung lượng $B$ không thể chứa $p+1$ sortie thuộc $H_p$. Đây là định nghĩa tập, chưa phải cut.\\
+$\displaystyle p(K+q)\ge\sum_{i\in H_p}y_i$ \eqref{eq:cyclecuts}
+& \textbf{Giới hạn số khách nặng theo số chu kỳ pin:} mỗi chu kỳ pin phục vụ tối đa $p$ khách trong $H_p$; buộc Master dự trù đủ lượt đổi pin khi phân công nhiều khách ngốn năng lượng.\\
+$\displaystyle K+q\ge\left\lceil\frac{\sum_i e_i y_i}{B}\right\rceil$
+& \textbf{Số chu kỳ từ tổng năng lượng:} số pin đầy sử dụng phải đủ để cung cấp tổng năng lượng cho tất cả sortie đã gán drone. Hệ quả của cận năng lượng, không cần thêm nếu đã có BĐT tương đương và $q$ nguyên.\\
+$\displaystyle q\ge \left\lceil\frac{\sum_{i\in H_p} y_i}{p}\right\rceil-K$
+& \textbf{Số lần đổi pin tối thiểu từ khách nặng:} nếu số khách thuộc $H_p$ vượt sức chứa $K$ chu kỳ pin đầu, phần vượt phải dùng thêm các chu kỳ tạo bởi thao tác đổi pin. Là hệ quả của BĐT đếm chu kỳ.\\
+$\displaystyle z_D\ge\max_{i\in D}r_i$ \eqref{eq:lb-work-plain}
+& \textbf{Thời gian của sortie dài nhất:} một khách cần chuyến bay dài $r_i$ không thể kết thúc trước $r_i$, cho dù phân công các khách còn lại thế nào.\\
+$\displaystyle z_D\ge\frac{1}{K}\sum_{i\in D}r_i$ \eqref{eq:lb-work-plain}
+& \textbf{Cân bằng workload lý tưởng:} ngay cả khi bỏ qua mọi thời gian đổi pin, $K$ drone không thể hoàn tất tổng thời gian bay $\sum r_i$ nhanh hơn mức trung bình. BĐT này đã được hàm ý bởi \eqref{eq:workload} khi $q\ge0$.\\
+\end{longtable}
+\endgroup
+\noindent\textbf{Ví dụ diễn giải trực quan.} Khi $p=1$, một chu kỳ pin không thể chứa hai sortie đều có $e_i>B/2$; do đó $K+q\ge\sum_{i:e_i>B/2}y_i$. Khi $p=2$, một chu kỳ pin không thể chứa ba sortie đều có $e_i>B/3$; suy ra $2(K+q)\ge\sum_{i:e_i>B/3}y_i$. Các trường hợp này \emph{có thể} làm chặt Master khi cận tổng năng lượng đơn thuần còn yếu.
+
+\section{CP Subproblem: mô hình điều độ chain-based}
+\label{sec:cp-explicit}
+\subsection{Biến và ý nghĩa}
+Với một phân công drone cố định $D$, đặt $m=|D|$ và $H=\min\{K,m\}$. Với mỗi $i\in D$, dùng $h_i=1$ nếu $i$ là khách hàng đầu chain, $s_i=1$ nếu đổi pin ngay trước sortie $i$, $a_i$ là thời điểm bắt đầu tác vụ gồm đổi pin và bay, $f_i$ là thời điểm hoàn thành; $b_i$ là năng lượng ngay trước khi bay sau khi đã đổi pin (nếu có), và $o_i$ là vị trí trong chain. Với $i\ne j$, $u_{ij}=1$ nếu $j$ là công việc kế tiếp ngay sau $i$ trong cùng chain. Biến $Z_D$ là drone makespan.
+
+Các đại lượng $r_i$, $e_i$, $B$ và $\sw$ là số nguyên sau khi nạp dữ liệu, phù hợp với CP-SAT. Đặt $R_i=r_i+\sw s_i$.
+
+\subsection{Cấu trúc của các chain}
+\begin{align}
+&\sum_{i\in D}h_i=H,&&\label{eq:cp-head}\tag{CP1}\\
+&h_j+\sum_{i\in D\setminus\{j\}}u_{ij}=1 &&\forall j\in D,\label{eq:cp-pred}\tag{CP2}\\
+&\sum_{j\in D\setminus\{i\}}u_{ij}\le1 &&\forall i\in D,\label{eq:cp-succ}\tag{CP3}\\
+&\sum_{i\ne j}u_{ij}=m-H.&&\label{eq:cp-arcs}\tag{CP4}
+\end{align}
+Ràng buộc vị trí loại chu trình:
+\begin{align}
+&h_i=1\Rightarrow o_i=1,\quad h_i=0\Rightarrow o_i\ge2,\label{eq:cp-headorder}\\
+&u_{ij}=1\Rightarrow o_j\ge o_i+1.\label{eq:cp-order}
+\end{align}
+Đặt $o_i\in\{1,\ldots,m\}$.
+
+\begin{lemma}[Sử dụng $H=\min\{K,m\}$ chain là không mất tổng quát]
+Trong mô hình không có chi phí khởi động drone, không có thời gian đồng bộ giữa các drone và không hạn chế số pin, tồn tại một lịch trình tối ưu sử dụng đúng $H$ chain không rỗng.
+\end{lemma}
+\begin{proof}
+Giả sử một lịch trình dùng $h<H$ chain không rỗng. Khi đó $h<K$ và một chain chứa ít nhất hai sortie, bởi $h<m$. Tách một suffix không rỗng của chain đó sang một drone trống và cho drone mới bay từ thời điểm $0$ với pin đầy. Không cần duy trì thao tác đổi pin vốn diễn ra trước suffix. Phần đầu và phần suffix đều có thời gian hoàn thành không vượt thời gian hoàn thành của chain cũ; makespan không tăng. Lặp lại đến khi có đúng $H$ chain.\end{proof}
+
+\subsection{Thời gian, năng lượng và đổi pin}
+\begin{align}
+&f_i=a_i+r_i+\sw s_i &&\forall i\in D,\label{eq:cp-duration}\\
+&h_i=1\Rightarrow (a_i=0,\ s_i=0,\ b_i=B),\label{eq:cp-initial}\\
+&u_{ij}=1\Rightarrow a_j=f_i,\label{eq:cp-timing}\\
+&b_i\ge e_i &&\forall i\in D,\label{eq:cp-energyone}\\
+&u_{ij}=1,\ s_j=0\Rightarrow b_j=b_i-e_i,\label{eq:cp-remain}\\
+&u_{ij}=1,\ s_j=1\Rightarrow b_j=B,\label{eq:cp-reset}\\
+&Z_D\ge f_i &&\forall i\in D.\label{eq:cp-Z}
+\end{align}
+Các biến $a_i,f_i,b_i$ không âm, $0\le b_i\le B$. Thời gian $\sw s_j$ đã được tính trong $R_j$ nên không cộng thêm lần nữa trên cung $u_{ij}$. Mục tiêu của CP tối ưu là $\min Z_D$.
+
+\subsection{Các ràng buộc tăng cường trong CP}
+\paragraph{Cận năng lượng tổng hợp.}
+\begin{equation}\label{eq:cp-agg}
+B\left(H+\sum_{i\in D}s_i\right)\ge\sum_{i\in D}e_i.
+\end{equation}
+\paragraph{Loại trừ hai sortie liên tiếp không đổi pin.}
+\begin{equation}\label{eq:cp-pair}
+e_i+e_j>B\quad\Longrightarrow\quad u_{ij}\le s_j.
+\end{equation}
+\begin{proof}[Giải thích tính hợp lệ của \eqref{eq:cp-pair}]
+Nếu $u_{ij}=1$ và $s_j=0$, năng lượng trước sortie $j$ là $b_j=b_i-e_i\le B-e_i$. Nhưng $e_i+e_j>B$ suy ra $b_j<e_j$, mâu thuẫn với \eqref{eq:cp-energyone}.\end{proof}
+\paragraph{Phá đối xứng theo chuỗi năng lượng.}
+\begin{equation}\label{eq:cp-symm}
+i>j\quad\Longrightarrow\quad u_{ij}\le s_j.
+\end{equation}
+Trong mỗi đoạn sortie không đổi pin, việc sắp theo chỉ số khách tăng dần không thay đổi tổng thời gian bay hoặc tổng năng lượng tiêu thụ; do đó \eqref{eq:cp-symm} không loại bỏ giá trị tối ưu trong những giả thiết đã nêu. Đây là mệnh đề phụ thuộc tính độc lập thứ tự, không thể giữ nguyên nếu bổ sung deadline hoặc thời gian bay phụ thuộc thứ tự.
+
+
+\subsection{Diễn giải bằng tiếng Việt các ràng buộc CP và các BĐT tăng cường}
+\label{subsec:cp-meaning}
+Các biểu thức dưới đây là ràng buộc của \emph{bài toán con CP với tập khách $D$ đã cố định}, khác với BĐT trong Master dùng để chặn dưới cho mọi phân công. Phần ``tăng cường'' là những ràng buộc dư thừa về mặt nghiệm nguyên nhưng hữu ích cho suy diễn (propagation) hoặc phá đối xứng.
+\begingroup
+\small\renewcommand{\arraystretch}{1.33}
+\begin{longtable}{@{}p{0.49\linewidth}p{0.47\linewidth}@{}}
+\caption{Công thức CP và diễn giải vận hành tương ứng}\label{tab:cp-meaning}\\
+\toprule
+\textbf{Biểu thức toán học} & \textbf{Ý nghĩa bằng tiếng Việt}\\\midrule
+\endfirsthead
+\toprule
+\textbf{Biểu thức toán học} & \textbf{Ý nghĩa (tiếp)}\\\midrule
+\endhead
+\bottomrule
+\endfoot
+$\displaystyle\sum_{i\in D}h_i=H$ \eqref{eq:cp-head}
+& \textbf{Số chuỗi drone:} tồn tại một lịch trình tối ưu có đúng $H=\min(K,|D|)$ drone được dùng; mỗi chuỗi có một khách đầu tiên.\\
+$\displaystyle h_j+\sum_{i\ne j}u_{ij}=1$ \eqref{eq:cp-pred}
+& \textbf{Duy nhất vị trí trước:} khách $j$ hoặc bắt đầu một chuỗi hoặc có đúng một khách đi trước; không được cả hai.\\
+$\displaystyle\sum_{j\ne i}u_{ij}\le1$ \eqref{eq:cp-succ}
+& \textbf{Tối đa một khách tiếp theo:} mỗi sortie chỉ nối sang tối đa một sortie tiếp theo trên cùng drone.\\
+$\displaystyle\sum_{i\ne j}u_{ij}=m-H$ \eqref{eq:cp-arcs}
+& \textbf{Đếm cung:} $m$ khách được chia thành $H$ chuỗi rời nhau thì có chính xác $m-H$ liên kết kế tiếp.\\
+$h_i=1\Rightarrow o_i=1$; $u_{ij}=1\Rightarrow o_j\ge o_i+1$ \eqref{eq:cp-order}
+& \textbf{Thứ tự và chống chu trình:} thứ tự tăng dọc mỗi cung được chọn; không thể tồn tại vòng kế tiếp $i\to\cdots\to i$.\\
+$\displaystyle f_i=a_i+r_i+\sw s_i$ \eqref{eq:cp-duration}
+& \textbf{Thời gian thao tác:} một công việc gồm thời gian đổi pin ngay trước sortie (nếu có) cộng thời gian bay khứ hồi.\\
+$u_{ij}=1\Rightarrow a_j=f_i$ \eqref{eq:cp-timing}
+& \textbf{Nối tiếp thời gian:} cùng drone phải hoàn tất công việc $i$ mới bắt đầu công việc $j$; trong mô hình không có chờ bắt buộc nên đặt bằng nhau.\\
+$\displaystyle b_i\ge e_i$ \eqref{eq:cp-energyone}
+& \textbf{Đủ pin cho sortie:} năng lượng còn lại trước khi bay phải đủ cho toàn bộ chuyến khứ hồi.\\
+$u_{ij}=1,s_j=0\Rightarrow b_j=b_i-e_i$ \eqref{eq:cp-remain}
+& \textbf{Truyền pin không đổi:} khi không đổi pin, mức pin trước sortie tiếp theo bằng mức pin trước sortie cũ trừ năng lượng đã tiêu thụ.\\
+$u_{ij}=1,s_j=1\Rightarrow b_j=B$ \eqref{eq:cp-reset}
+& \textbf{Khôi phục pin:} nếu đổi pin trước sortie $j$, năng lượng khả dụng trước bay trở về dung lượng đầy $B$.\\
+$\displaystyle B\left(H+\sum_{i\in D}s_i\right)\ge\sum_{i\in D}e_i$ \eqref{eq:cp-agg}
+& \textbf{Tăng cường tổng năng lượng:} các pin ban đầu của $H$ drone cùng các lần đổi pin phải đủ năng lượng cho tất cả khách trong $D$; giúp CP suy diễn sớm.\\
+$e_i+e_j>B\Rightarrow u_{ij}\le s_j$ \eqref{eq:cp-pair}
+& \textbf{Hai sortie xung khắc về pin:} nếu hai sortie liên tiếp tiêu thụ nhiều hơn một pin đầy, bắt buộc phải đổi pin trước $j$. Đây là BĐT tăng cường được suy ra từ truyền năng lượng.\\
+$i>j\Rightarrow u_{ij}\le s_j$ \eqref{eq:cp-symm}
+& \textbf{Phá đối xứng thứ tự:} trong một đoạn không đổi pin, sắp khách theo chỉ số tăng dần vì thứ tự không làm thay đổi tổng thời gian hay năng lượng theo giả thiết.\\
+$\displaystyle Z_D\ge f_i$ \eqref{eq:cp-Z}
+& \textbf{Makespan drone:} thời gian hoàn tất chung của đội drone không thể nhỏ hơn thời gian kết thúc bất kỳ sortie nào.\\
+\end{longtable}
+\endgroup
+
+\subsection{Giới hạn thời gian CP an toàn}
+Một cận trên xây dựng được cho mỗi tập $D$ là \eqref{eq:constructub}; có thể đặt
+\begin{equation}\label{eq:horizon}
+\operatorname{horizon}(D)=U(D)+10
+\end{equation}
+(nếu dữ liệu tính bằng giây) mà không cắt mất nghiệm tối ưu. Khi dùng các phép cộng số nguyên 64-bit phải kiểm soát tràn số. Mã hiện hành sử dụng cận rộng hơn $\sum_{i\in D}(r_i+\sw)+10$.
+
+\section{Các tính chất toán học của drone subproblem}
+\subsection{Tính khả thi và cận trên xây dựng được}
+\begin{proposition}[Mọi tập khách hàng đủ điều kiện đều khả thi]\label{prop:feasible}
+Với mọi $D\subseteq\CD$, bài toán drone subproblem là khả thi. Hơn nữa, đặt
+\begin{equation}\label{eq:constructub}
+U(D)=\sum_{i\in D}r_i+\sw\max\{0,|D|-1\}.
+\end{equation}
+Khi đó $\opt(D)\le U(D)$.
+\end{proposition}
+\begin{proof}
+Nếu $D=\varnothing$, lịch trình trống có makespan $0$. Nếu $D$ không rỗng, chọn một drone và lần lượt phục vụ toàn bộ khách hàng trong $D$. Đổi pin trước mỗi sortie kể từ sortie thứ hai. Sau mỗi lần đổi, pin trở về $B$, trong khi $e_i\le B$; mọi sortie đều khả thi. Tổng thời gian của chuỗi này đúng bằng $U(D)$. Các drone khác không cần hoạt động. Do đó tồn tại một lịch trình khả thi có makespan $U(D)$.
+\end{proof}
+\begin{remark}[Không cần feasibility no-good cuts]
+Dưới các giả thiết hiện tại, không có tập $D\subseteq\CD$ nào khiến \emph{drone subproblem gốc} vô nghiệm. Vì vậy không có lý do toán học để tạo no-good cut loại một tập khách hàng chỉ vì subproblem tối ưu bị dừng sớm hoặc vì mô hình CP bị đặt \texttt{horizon} quá nhỏ. Việc có một \emph{ngưỡng makespan} quá thấp chỉ làm bài toán CP bị chặn bởi ngưỡng đó vô nghiệm, không làm tập $D$ trở nên bất khả thi.
+\end{remark}
+
+\subsection{Tính đơn điệu}
+\begin{theorem}[Monotonicity]\label{thm:monotone}
+Nếu $A\subseteq D\subseteq\CD$ thì
+\begin{equation}\label{eq:monotone}
+\opt(A)\le\opt(D).
+\end{equation}
+\end{theorem}
+\begin{proof}
+Lấy một lịch trình tối ưu phục vụ $D$. Xóa các sortie của khách hàng trong $D\setminus A$. Giữ nguyên các lần đổi pin cần thiết giữa những sortie còn lại và bỏ các lần đổi pin thừa. Việc xóa sortie chỉ làm giảm tiêu thụ năng lượng và thời gian trên các chuỗi; các chuỗi vẫn khả thi và makespan không tăng. Vì $\opt(A)$ là makespan nhỏ nhất trên mọi lịch trình phục vụ $A$, ta có $\opt(A)\le\opt(D)$.
+\end{proof}
+
+\subsection{Bất đẳng thức chèn sortie và hệ quả Lipschitz}
+\begin{lemma}[Giới hạn mức tăng makespan khi thêm khách hàng]\label{lem:insertion}
+Với $A\subseteq D\subseteq\CD$, ta có
+\begin{equation}\label{eq:insertion}
+\opt(D)\le\opt(A)+\sum_{i\in D\setminus A}(r_i+\sw).
+\end{equation}
+\end{lemma}
+\begin{proof}
+Lấy một lịch trình tối ưu của $A$. Chọn một drone bất kỳ, giữ nguyên các sortie đã lên lịch, rồi bổ sung lần lượt các khách hàng thuộc $D\setminus A$ vào cuối chuỗi của drone đó. Trước mỗi sortie mới, thực hiện một lần đổi pin nếu cần. Vì $e_i\le B$, một lần đổi pin (nếu thực hiện) bảo đảm đủ năng lượng cho sortie $i$. Mỗi khách hàng được thêm làm tăng thời gian của chuỗi được chọn không quá $r_i+\sw$. Makespan của lịch trình xây dựng được không vượt vế phải của \eqref{eq:insertion}. Tối ưu trên mọi lịch trình của $D$ cho kết luận.
+\end{proof}
+\begin{corollary}[Cận giảm makespan khi bỏ khách hàng]\label{cor:remove}
+Với $A\subseteq D\subseteq\CD$,
+\begin{equation}\label{eq:removal}
+\opt(A)\ge\opt(D)-\sum_{i\in D\setminus A}(r_i+\sw).
+\end{equation}
+\end{corollary}
+\begin{proof}
+Chuyển vế bất đẳng thức \eqref{eq:insertion}.
+\end{proof}
+
+\section{Lát cắt LBBD tối ưu hợp lệ}
+\subsection{Lát cắt dựa trên một tập tham chiếu}
+Xét một nghiệm phân công trong Master có tập drone $\barD=\{i\in\CD:\bar y_i=1\}$. Giả sử đã có một giá trị $L(\barD)$ được \emph{chứng nhận} thỏa
+\[
+0\le L(\barD)\le\opt(\barD).
+\]
+Nguồn của $L(\barD)$ có thể là giá trị tối ưu CP đã chứng minh, cận dưới của solver, hoặc một công thức cận dưới hợp lệ.
+
+\begin{theorem}[Lipschitz-type LBBD optimality cut]\label{thm:cut}
+Với mọi $L(\barD)\in[0,\opt(\barD)]$, bất đẳng thức
+\begin{equation}\label{eq:lbbd}
+\boxed{\quad z_D+\sum_{i\in\barD}(r_i+\sw)(1-y_i)\ \ge\ L(\barD)\quad}
+\end{equation}
+là một ràng buộc hợp lệ của bài toán gốc, trong đó $z_D$ được yêu cầu lớn hơn hoặc bằng makespan drone thực tế.
+\end{theorem}
+\begin{proof}
+Cho một nghiệm gốc bất kỳ có tập khách hàng drone $D$. Đặt $A=D\cap\barD$. Theo Định lý~\ref{thm:monotone}, $\opt(D)\ge\opt(A)$. Theo Hệ quả~\ref{cor:remove},
+\[
+\opt(A)\ge\opt(\barD)-\sum_{i\in\barD\setminus D}(r_i+\sw)
+\ge L(\barD)-\sum_{i\in\barD\setminus D}(r_i+\sw).
+\]
+Vì $z_D\ge\opt(D)$ trong mô hình đầy đủ và $1-y_i$ là chỉ thị $i\in\barD\setminus D$ với $i\in\barD$, suy ra \eqref{eq:lbbd}.
+\end{proof}
+
+\begin{remark}[Không phụ thuộc vào khách hàng mới được thêm]
+Vế phải không phải giảm khi các khách hàng ngoài $\barD$ được gán thêm cho drone. Điều này phù hợp với tính đơn điệu: tăng tập khách hàng drone không thể giảm makespan tối ưu dưới các giả thiết hiện tại.
+\end{remark}
+
+\subsection{Hệ số được chặn bởi giá trị chứng nhận}
+\begin{corollary}[Hệ số chặn nhỏ hơn, cut không yếu hơn]\label{cor:cap}
+Đặt
+\begin{equation}\label{eq:capped}
+\delta_i(\barD)=\min\{r_i+\sw,\ L(\barD)\},\qquad i\in\barD.
+\end{equation}
+Khi đó bất đẳng thức sau cũng hợp lệ:
+\begin{equation}\label{eq:cappedcut}
+\boxed{\quad z_D+\sum_{i\in\barD}\delta_i(\barD)(1-y_i)\ \ge\ L(\barD).\quad}
+\end{equation}
+Hơn nữa, \eqref{eq:cappedcut} không yếu hơn \eqref{eq:lbbd}.
+\end{corollary}
+\begin{proof}
+Nếu không có khách hàng nào trong $\barD$ bị bỏ, hai bất đẳng thức có cùng vế trái. Nếu có ít nhất một khách hàng bị bỏ với $r_i+\sw>L(\barD)$, thì tổng hệ số bị bỏ trong \eqref{eq:cappedcut} ít nhất bằng $L(\barD)$ và vế phải sau khi chuyển vế không dương; điều kiện $z_D\ge0$ bảo đảm tính hợp lệ. Trong các trường hợp còn lại, các hệ số bị bỏ bằng nhau giữa hai cut. Do $\delta_i(\barD)\le r_i+\sw$, cut mới luôn không yếu hơn cut cũ.
+\end{proof}
+
+\subsection{So sánh với monotone implication cut}
+Từ Định lý~\ref{thm:monotone}, ta cũng có lát cắt hợp lệ
+\begin{equation}\label{eq:monotonecut}
+z_D\ge L(\barD)\left(1-\sum_{i\in\barD}(1-y_i)\right).
+\end{equation}
+Nếu tất cả khách hàng trong $\barD$ vẫn được chọn, bất đẳng thức yêu cầu $z_D\ge L(\barD)$. Nếu có ít nhất một khách hàng bị bỏ, vế phải không dương. Vì $\delta_i(\barD)\le L(\barD)$, cut \eqref{eq:cappedcut} cho vế phải lớn hơn hoặc bằng \eqref{eq:monotonecut}. Do đó, hệ số chặn \eqref{eq:capped} ít nhất mạnh bằng monotone implication cut này.
+
+\subsection{Cận dưới đơn giản có thể dùng mà không tối ưu CP}
+Với tập $D$, luôn có
+\begin{align}
+L_{\mathrm{single}}(D)&=\max\bigl(\{0\}\cup\{r_i:i\in D\}\bigr),\label{eq:lb-single}\\
+L_{\mathrm{work}}(D)&=\frac1K\sum_{i\in D}r_i,\label{eq:lb-work}\\
+L_{\mathrm{energy}}(D)&=\frac1K\left[\sum_{i\in D}r_i+
+\sw\max\left\{0,\left\lceil\frac{\sum_{i\in D}e_i}{B}\right\rceil-K\right\}\right].\label{eq:lb-energy}
+\end{align}
+Bất đẳng thức \eqref{eq:lb-energy} là hợp lệ do tổng số lần đổi pin phải đạt ít nhất $\max\{0,\lceil\sum e_i/B\rceil-K\}$. Do đó
+\begin{equation}\label{eq:lb-instant}
+L_{\mathrm{simple}}(D)=\max\{L_{\mathrm{single}}(D),L_{\mathrm{energy}}(D)\}
+\le\opt(D).
+\end{equation}
+Có thể dùng trực tiếp $L_{\mathrm{simple}}(\barD)$ trong \eqref{eq:cappedcut}; tuy vậy lợi ích tăng cường so với các ràng buộc Master có thể nhỏ. Cận dưới mạnh được CP chứng nhận thường có ý nghĩa hơn.
+
+
+\subsection{Các lát cắt hợp lệ: biểu thức và cách hiểu trực tiếp}
+\label{subsec:lbbd-meaning}
+\begingroup
+\small\renewcommand{\arraystretch}{1.39}
+\begin{longtable}{@{}p{0.49\linewidth}p{0.47\linewidth}@{}}
+\caption{Diễn giải bằng tiếng Việt từng bất đẳng thức LBBD và các cận liên quan}\label{tab:lbbd-meaning}\\
+\toprule
+\textbf{Biểu thức toán học} & \textbf{Nội dung/vấn đề được diễn giải}\\\midrule
+\endfirsthead
+\toprule
+\textbf{Biểu thức toán học} & \textbf{Ý nghĩa (tiếp)}\\\midrule
+\endhead
+\bottomrule
+\endfoot
+$\opt(A)\le\opt(D)$ với $A\subseteq D$ \eqref{eq:monotone}
+& \textbf{Tính đơn điệu:} phải phục vụ thêm khách hàng bằng drone không thể làm giảm makespan drone tối ưu.\\
+$\displaystyle\opt(D)\le\opt(A)+\sum_{i\in D\setminus A}(r_i+\sw)$ \eqref{eq:insertion}
+& \textbf{Giới hạn chi phí bổ sung:} có thể thêm mỗi khách vào cuối một chuỗi, đổi pin trước khách đó, nên makespan tối ưu tăng không quá thời gian bay cộng một lần đổi pin.\\
+$\displaystyle z_D+\sum_{i\in\barD}(r_i+\sw)(1-y_i)\ge L(\barD)$ \eqref{eq:lbbd}
+& \textbf{Lipschitz LBBD cut:} tại tập tham chiếu $\barD$, Master phải trả ít nhất cận được chứng nhận $L(\barD)$. Nếu bỏ khách $i$ khỏi drone, cut cho phép giảm cận nhiều nhất $r_i+\sw$; thêm khách không làm yếu cut.\\
+$\displaystyle\delta_i=\min\{r_i+\sw,L(\barD)\}$ \eqref{eq:capped}
+& \textbf{Chặn hệ số của cut:} không cần cho phép giảm cận bởi một khách quá mức $L(\barD)$, vì $z_D$ vốn không âm; giảm hệ số mà vẫn giữ cut hợp lệ.\\
+$\displaystyle z_D+\sum_{i\in\barD}\delta_i(1-y_i)\ge L(\barD)$ \eqref{eq:cappedcut}
+& \textbf{Strong LBBD cut:} cùng logic với cut gốc nhưng hệ số nhỏ hơn hoặc bằng, nên chặn dưới không yếu hơn đối với mọi nghiệm Master. Đây là cut triển khai trong callback.\\
+$\displaystyle z_D\ge L(\barD)\left(1-\sum_{i\in\barD}(1-y_i)\right)$ \eqref{eq:monotonecut}
+& \textbf{Monotone implication cut:} chỉ ép cận $L(\barD)$ nếu giữ đủ khách của tập tham chiếu; khi bỏ một khách thì bất đẳng thức thường chỉ còn cận không dương, yếu hơn strong cut.\\
+$\displaystyle L^{CP}(D)\le\opt(D)\le U^{CP}(D)$ \eqref{eq:bounds}
+& \textbf{Tách chứng nhận CP:} $L^{CP}$ là cận dưới được chứng minh; $U^{CP}$ là lịch trình khả thi. Chỉ $L^{CP}$ được phép đưa vào vế phải của LBBD cut.\\
+$\displaystyle Z_D\le T,\quad\opt(\barD)\ge T+1$ \eqref{eq:deadline}--\eqref{eq:decisionlb}
+& \textbf{CP kiểm tra hạn chót:} nếu không có lịch trình với makespan $\le T$ và CP chứng minh bất khả thi, thì tối ưu nguyên ít nhất $T+1$; dùng con số này để tạo optimality cut, \emph{không} loại hẳn tập khách drone.\\
+$\displaystyle U(D)=\sum_{i\in D}r_i+\sw\max\{0,|D|-1\}$ \eqref{eq:constructub}
+& \textbf{Cận trên có lịch trình chứng minh:} một drone có thể phục vụ tuần tự tất cả khách, đổi pin trước mỗi khách từ khách thứ hai; lịch trình này chứng minh luôn tồn tại nghiệm drone khả thi.\\
+\end{longtable}
+\endgroup
+\noindent\textbf{Phân biệt tính hợp lệ và tác dụng làm chặt:} tất cả BĐT trong bảng chỉ được dùng với đúng giả thiết và chứng nhận đã nêu. ``Hợp lệ'' nghĩa là không cắt mất nghiệm gốc; ``làm chặt'' nghĩa là có khả năng loại thêm nghiệm thư giãn hoặc nâng lower bound, \emph{không} có nghĩa chắc chắn giảm runtime trên mọi instance.
+
+\section{Khai thác chứng nhận CP-SAT để giữ tính exact}
+\subsection{Phân biệt ba đại lượng}
+Với mỗi tập $D$, định nghĩa:
+\begin{equation}\label{eq:bounds}
+L^{CP}(D)\ \le\ \opt(D)\ \le\ U^{CP}(D).
+\end{equation}
+$L^{CP}$ là lower bound được chứng nhận bởi mô hình CP chính xác; $U^{CP}$ là makespan của một lịch trình \emph{thật sự khả thi}; $\opt$ là tối ưu chưa chắc đã được biết. Khi CP-SAT mới tìm được nghiệm khả thi, \texttt{objective\_value} chỉ cung cấp $U^{CP}$ và \textbf{không được dùng thay cho $L^{CP}$}.
+
+\begin{proposition}[Cut từ lower bound của CP]\label{prop:cpbound}
+Nếu CP mô hình hóa chính xác bài toán \eqref{eq:phi} và xuất ra cận dưới được chứng nhận $L^{CP}(\barD)$, thì thay $L(\barD)$ trong \eqref{eq:lbbd} hoặc \eqref{eq:cappedcut} bằng $L^{CP}(\barD)$ giữ nguyên tính hợp lệ, dù CP chưa tìm được nghiệm tối ưu.
+\end{proposition}
+\begin{proof}
+Theo giả thiết, $L^{CP}(\barD)\le\opt(\barD)$. Áp dụng Định lý~\ref{thm:cut} hoặc Hệ quả~\ref{cor:cap}.
+\end{proof}
+
+\subsection{Ba kết quả kiểm tra một nghiệm nguyên Master}
+Giả sử Master đưa ra $\barD$ cùng giá trị hiện tại $\bar z_D$, và các SEC của truck đã được thỏa mãn. Có ba tình huống:
+\begin{enumerate}
+\item \textbf{Chứng nhận khả thi:} CP tìm được lịch trình với $U^{CP}(\barD)\le\bar z_D$ (theo dung sai đã xác định). Khi đó thành phần drone của nghiệm Master là khả thi; có thể chấp nhận nghiệm nguyên này về mặt cấu trúc.
+\item \textbf{Chứng nhận vi phạm:} CP chứng minh $L^{CP}(\barD)>\bar z_D$. Thêm lát cắt \eqref{eq:cappedcut} với $L(\barD)=L^{CP}(\barD)$. Tại nghiệm hiện tại, mọi $y_i=1$ trên $\barD$ nên cut bị vi phạm và loại được nghiệm nguyên Master đó.
+\item \textbf{Chưa quyết định:} $L^{CP}(\barD)\le\bar z_D<U^{CP}(\barD)$. Không đủ cơ sở toán học để kết luận khả thi hoặc loại nghiệm. Cần tiếp tục CP hoặc có cơ chế giải quyết độc lập; nếu không, \textbf{không được báo cáo kết quả như chứng nhận tối ưu toàn cục}.
+\end{enumerate}
+So sánh ở đây sử dụng $\bar z_D$, không chỉ $\bar z$: trong mô hình đầy đủ, biến $z_D$ phải đại diện cho một cận trên hợp lệ của drone makespan, trong khi $z$ có thể bị chi phối bởi tuyến xe tải.
+
+\subsection{Quy trình Branch-and-Check}
+\begin{algorithm}[htbp]
+\caption{Tách lát cắt tại nghiệm nguyên của Master (logic khái niệm)}
+\label{alg:branchcheck}
+\begin{algorithmic}[1]
+\Require Nghiệm nguyên Master $(\bar x,\bar y,\bar z_D)$.
+\State Kiểm tra chu trình con của truck; nếu có, thêm SEC bị vi phạm.
+\If{tồn tại SEC bị vi phạm}
+  \State \Return \textsc{Rejected}.
+\EndIf
+\State $\barD\gets\{i\in\CD:\bar y_i=1\}$.
+\State Giải CP của $\barD$ đến khi đủ chứng nhận hoặc đạt giới hạn tài nguyên.
+\If{có lịch trình drone với $U^{CP}(\barD)\le\bar z_D$}
+  \State \Return \textsc{Certified feasible}.
+\ElsIf{có chứng nhận $L^{CP}(\barD)>\bar z_D$}
+  \State Thêm cut \eqref{eq:cappedcut} với $L(\barD)=L^{CP}(\barD)$.
+  \State \Return \textsc{Rejected by valid cut}.
+\Else
+  \State \Return \textsc{Unresolved} \Comment{Không tuyên bố exactness}
+\EndIf
+\end{algorithmic}
+\end{algorithm}
+
+\begin{theorem}[Điều kiện đủ cho tính chính xác]\label{thm:exact}
+Giả sử (i) Master và các SEC được xử lý đúng; (ii) CP mô hình hóa chính xác $\opt(D)$; (iii) mỗi nghiệm nguyên Master được kiểm tra đến khi hoặc chứng minh lịch trình drone khả thi trong $\bar z_D$, hoặc bổ sung được một lát cắt hợp lệ bị vi phạm; và (iv) quá trình MILP chứng minh đã đạt tối ưu toàn cục với dung sai số học được kiểm soát. Khi đó nghiệm cuối cùng là tối ưu toàn cục của mô hình PDSTSP-BS đã phát biểu.
+\end{theorem}
+\begin{proof}
+Theo Mệnh đề~\ref{prop:mastervalid}, Master là thư giãn của bài toán gốc. Theo Định lý~\ref{thm:cut} và các SEC, mọi lát cắt được thêm đều hợp lệ và không thể loại nghiệm khả thi của bài toán gốc khi các biến phụ được chọn thích hợp. Theo điều kiện (iii), không có nghiệm nguyên Master nào vi phạm cấu trúc drone mà vẫn được chấp nhận. Do đó tập nghiệm nguyên còn lại sau quá trình kiểm tra tương ứng với các lịch trình gốc khả thi. Khi MILP chứng minh tối ưu trên tập này, nghiệm thu được có giá trị không lớn hơn mọi nghiệm gốc khả thi, đồng thời chính nó khả thi cho bài toán gốc. Vì vậy nghiệm là tối ưu toàn cục.
+\end{proof}
+
+
+\section{Branch-and-Check tại nghiệm nguyên và cơ chế chứng nhận}
+\label{sec:actualbc}
+\subsection{CP decision với ngưỡng makespan}
+Một kiểm tra hiệu quả hơn việc luôn giải $\min Z_D$ là giải bài toán chỉ có ràng buộc mới
+\begin{equation}\label{eq:deadline}
+Z_D\le T,\qquad T=\left\lfloor\bar z_D+\varepsilon\right\rfloor,
+\end{equation}
+trong đó $\bar z_D$ là giá trị biến drone makespan của nghiệm Master. Nếu CP tìm được lịch trình, thành phần drone đã được chứng nhận khả thi tại ngưỡng. Nếu CP chứng minh \texttt{INFEASIBLE}, do các thời gian là số nguyên, suy ra
+\begin{equation}\label{eq:decisionlb}
+\opt(\barD)\ge T+1.
+\end{equation}
+Bởi vậy, có thể sinh \eqref{eq:cappedcut} với $L(\barD)=T+1$. Đây là \emph{optimality cut từ bất khả thi có giới hạn thời gian}, tuyệt đối không phải no-good feasibility cut loại cả tập $\barD$.
+
+Nếu CP-SAT trả về \texttt{UNKNOWN}, kết luận duy nhất là chưa đủ chứng nhận. Có thể tăng thời gian hoặc giải một CP optimization để khai thác \texttt{best\_objective\_bound}. Không dùng makespan của nghiệm CP chưa tối ưu làm lower bound.
+
+\subsection{Cache theo tập phân công drone}
+Vì $\opt(D)$ chỉ phụ thuộc tập $D$ mà không phụ thuộc tuyến xe tải, lưu cache bằng bitstring $y_1\cdots y_n$ gồm các trường:
+\begin{equation}
+\mathrm{cache}(D)=(L_D,U_D,\mathcal S_D),
+\end{equation}
+trong đó $L_D$ là lower bound lớn nhất đã chứng nhận; $U_D$ là makespan của một lịch trình khả thi tốt nhất đã biết; $\mathcal S_D$ là một lịch trình thực sự có makespan $U_D$. Các cập nhật an toàn là lấy maximum của cận dưới và minimum của cận trên, đồng thời thay $\mathcal S_D$ chỉ khi tìm được lịch trình mới khả thi.
+
+Có thể khởi tạo
+\begin{equation}
+L_D\leftarrow\max\left\{\max_{i\in D}r_i,\left\lceil\frac{\sum_{i\in D}r_i}{K}\right\rceil\right\},
+\qquad U_D\leftarrow U(D).
+\end{equation}
+Cận $U(D)$ đi kèm lịch trình một drone được xây dựng rõ ràng nên đây là một \emph{upper bound có witness}. Trong trường hợp cache ghi $U_D\le T$, không cần gọi CP và nghiệm đã đạt điều kiện kiểm tra drone.
+
+\subsection{Adaptive CP time limits và bảo vệ exactness}
+Các phép kiểm tra SAT được thực hiện với ngân sách thời gian tăng dần, ví dụ $0.2$, $1.0$ và $t_{CP}$ giây. Đây là \emph{ngân sách tìm kiếm}, không phải giả thiết toán học. Nếu vẫn chưa chứng nhận, thử CP optimization ở thời gian dài hơn. Nếu cuối cùng chưa kết luận, callback yêu cầu dừng MILP và ghi nhận \emph{unresolved}, thay vì trả về bình thường và khiến Gurobi coi incumbent có thể không khả thi là hợp lệ.
+
+\begin{algorithm}[htbp]
+\caption{Exact-aware separation tại \texttt{MIPSOL} (rút gọn)}\label{alg:impl}
+\begin{algorithmic}[1]
+\Require Nghiệm nguyên $(\bar x,\bar y,\bar z_D)$ và cache hiện tại.
+\State Tách truck SEC; nếu có SEC bị vi phạm, thêm SEC và \Return.
+\State $D\gets\{i:\bar y_i=1\}$; $T\gets\lfloor\bar z_D+\varepsilon\rfloor$.
+\State Tải $L_D,U_D,\mathcal S_D$ từ cache; bổ sung các cận giải tích.
+\If{$L_D>T$}
+  \State Thêm cut \eqref{eq:cappedcut} với $L=L_D$; \Return.
+\ElsIf{$U_D\le T$}
+  \State \Return \textsc{Certified Feasible}.
+\EndIf
+\For{mỗi ngân sách thời gian CP trong dãy tăng dần}
+  \State Giải CP feasibility \eqref{eq:deadline}.
+  \If{CP tìm được lịch trình hợp lệ có makespan $\le T$}
+    \State Cập nhật $U_D,\mathcal S_D$; \Return.
+  \ElsIf{CP chứng minh \texttt{INFEASIBLE}}
+    \State $L_D\gets\max\{L_D,T+1\}$; thêm cut \eqref{eq:cappedcut}; \Return.
+  \EndIf
+\EndFor
+\State Giải CP optimization, cập nhật $L_D$ và $U_D$ bằng chứng nhận nếu có.
+\If{$L_D>T$}
+ \State Thêm LBBD cut; \Return.
+\ElsIf{$U_D\le T$}
+ \State \Return \textsc{Certified Feasible}.
+\Else
+ \State Đánh dấu \textsc{Unresolved}; dừng Gurobi \textbf{không tuyên bố optimal}.
+\EndIf
+\end{algorithmic}
+\end{algorithm}
+
+\subsection{Greedy warm start cho CP-SAT}
+Để gợi ý nghiệm khả thi, có thể phân phối các khách hàng theo thứ tự chỉ số tăng dần, ưu tiên tạo $H$ chain rồi gán khách tiếp theo cho drone đang có thời điểm kết thúc sớm nhất. Nếu năng lượng còn lại nhỏ hơn $e_i$, chèn một lần đổi pin. Cấu trúc gợi ý bao gồm $h_i,u_{ij},s_i,a_i,f_i,b_i,o_i,Z_D$ và được gửi bằng \texttt{AddHint}. Hints là chỉ dẫn tìm kiếm, không phải ràng buộc; vì thế không ảnh hưởng tính exact.
+
+\subsection{Đối chiếu với mã nguồn C++}
+\begin{table}[htbp]
+\centering\small
+\caption{Vị trí các thành phần trong repository nguồn và bản nâng cấp}
+\begin{tabular}{p{50mm}p{96mm}}
+\toprule
+\textbf{File} & \textbf{Vai trò}\\\midrule
+\texttt{include/Types.h} & Cấu trúc dữ liệu, trạng thái CP phân biệt \texttt{UNKNOWN}, \texttt{INFEASIBLE}, certified bounds.\\
+\texttt{include/CPSubproblem.h} & Giao diện giải CP tối ưu hoặc CP decision theo deadline.\\
+\texttt{src/CPSubproblem.cpp} & Chain-based CP-SAT, battery compatibility, hints, CP lower-bound extraction.\\
+\texttt{src/MasterProblem.cpp} & Master MILP, truck SEC, cycle inequalities, callback LBBD, cache, adaptive CP, kết quả chứng nhận.\\
+\texttt{src/DataReader.cpp} & Nạp dữ liệu và làm tròn các tham số nguyên cho mô hình đã rời rạc hoá.\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Gợi ý cài đặt Gurobi C++ an toàn}
+Đoạn mã sau chỉ minh họa \emph{biểu thức cut}; tên biến trong chương trình thực tế cần được ánh xạ tương ứng. Hàm chỉ được gọi khi CP đã trả về một \emph{certified lower bound} hữu hạn và chứng minh cut đang vi phạm nghiệm nguyên hiện tại.
+
+\begin{lstlisting}[style=cppsimple,caption={Separation of a certified Lipschitz-type cut}]
+void addCertifiedDroneCut(
+    const std::vector<int>& reference_D,
+    double certified_lb,
+    double incumbent_zd,
+    double separation_tol) {
+  if (!std::isfinite(certified_lb) || certified_lb < 0.0) {
+    return;  // Not a usable certified bound.
+  }
+  if (incumbent_zd + separation_tol >= certified_lb) {
+    return;  // No violation at the reference assignment.
+  }
+
+  GRBLinExpr lhs = zD_;
+  for (int i : reference_D) {
+    const double coeff = std::min(
+        inst_.DroneRoundTripTime(i) + inst_.swap_time,
+        certified_lb);
+    lhs += coeff * (1.0 - y_[i]);
+  }
+
+  // Valid only when certified_lb <= true optimal
+  // drone makespan for reference_D.
+  addLazy(lhs >= certified_lb);
+}
+\end{lstlisting}
+
+Các điều kiện triển khai quan trọng:
+\begin{itemize}
+\item Thiết lập \texttt{LazyConstraints=1}; tách SEC và drone cuts tại \texttt{GRB\_CB\_MIPSOL}. Không gọi \texttt{addLazy} với một cut không bị vi phạm ở nghiệm nguyên hiện tại.
+\item Chỉ dùng $L^{CP}$ nếu bài toán CP là mô hình \emph{chính xác} của cùng dữ liệu và đơn vị thời gian. Với CP-SAT, các ràng buộc sử dụng số nguyên; phải mô tả phép scale/làm tròn rõ ràng. Nếu thời gian thực không biểu diễn chính xác được trên lưới số nguyên, chứng nhận chỉ áp dụng cho bài toán đã rời rạc hóa, trừ khi có lập luận chuyển cận được chứng minh an toàn.
+\item Nếu CP dừng ở trạng thái chưa phân định, không xem nghiệm khả thi CP có makespan lớn hơn $\bar z_D$ như chứng minh vô nghiệm ở ngưỡng đó.
+\item Khi dùng sai số số học, ngưỡng chấp nhận/loại phải tương thích với độ chính xác của CP, Gurobi và cách làm tròn. Tuyên bố ``exact'' luôn phải nêu rõ dung sai tính toán.
+\end{itemize}
+
+
+\section{Kiểm thử, dữ liệu và phạm vi xác nhận}
+\label{sec:validation}
+\subsection{Các trường hợp phải kiểm tra}
+\begin{enumerate}
+\item $D=\varnothing$; $|D|\le K$; $|D|>K$; không cần đổi pin và bắt buộc đổi pin.
+\item CP \texttt{INFEASIBLE} ở \emph{deadline} nhưng bài toán CP không deadline khả thi.
+\item CP trả \texttt{UNKNOWN}: callback phải dừng/tiếp tục kiểm chứng, không được thêm no-good cut.
+\item CP trả \texttt{FEASIBLE} với makespan lớn hơn ngưỡng: không được coi đó là cận dưới.
+\item Cùng một $D$ nhưng khác truck route: phải tái sử dụng cache và không làm thay đổi $\opt(D)$.
+\item Gurobi dừng theo thời gian: phân biệt incumbent có lịch trình chứng nhận với nghiệm đã chứng minh tối ưu.
+\end{enumerate}
+
+\subsection{Kiểm tra toán học độc lập}
+Gói đi kèm có \texttt{tests/test\_mathematical\_validity.py}, liệt kê tất cả tập khách drone và tính tối ưu bằng vét cạn trên các bộ nhỏ. Kiểm tra bất đẳng thức Lipschitz, tính đơn điệu và battery-cycle inequalities. Đây là \emph{kiểm tra phụ} cho chứng minh toán học, không thay thế chạy chương trình tích hợp.
+
+\subsection{Những giới hạn cần công bố}
+Bản vá được thiết kế dựa trên cấu trúc repository \texttt{vudmvn/milp\_cp\_branch\_check\_cpp}, nhánh \texttt{master} được đọc ngày 07/11/2026. Môi trường tạo tài liệu không có thư viện Gurobi/OR-Tools C++ để build hoặc benchmark. Vì vậy cần xác nhận compile, test với bộ dữ liệu nhỏ có nghiệm đối chứng và kiểm tra các phiên bản thư viện sau khi áp dụng bản vá vào checkout thực tế. Mọi kết luận ``exact'' áp dụng cho các dữ liệu nguyên sau bước rời rạc hoá và dung sai số được sử dụng.
+
+\section{Kết luận và phạm vi kết quả}
+Các kết quả đã được chứng minh trong tài liệu là: (1) Master cùng các battery-cycle inequalities tạo một thư giãn hợp lệ; (2) mọi tập khách hàng đủ điều kiện cho drone đều khả thi; (3) hàm $\opt(D)$ có tính đơn điệu; (4) thêm một khách hàng $i$ làm tăng makespan tối ưu không quá $r_i+\sw$; (5) các lát cắt \eqref{eq:lbbd} và \eqref{eq:cappedcut} hợp lệ khi sử dụng \emph{lower bound được chứng nhận}; và (6) Branch-and-Check là exact nếu mọi nghiệm nguyên được kiểm tra đến một kết luận có chứng nhận.
+
+Tài liệu \textbf{không khẳng định} rằng các cuts mới luôn cải thiện thời gian chạy, không cho rằng CP-SAT luôn giải được bài toán con trong một giới hạn thời gian cụ thể, và không sử dụng feasibility/UNSAT-core cuts vì chúng không cần thiết trong mô hình vận hành hiện tại. Các giả thiết bổ sung như số pin dự phòng hữu hạn, thời gian chờ trạm đổi pin hoặc giới hạn giờ vận hành có thể làm thay đổi cả cấu trúc subproblem và tính hợp lệ của các chứng minh.
+
+\section*{Tài liệu kỹ thuật để đối chiếu triển khai}
+\addcontentsline{toc}{section}{Tài liệu kỹ thuật để đối chiếu triển khai}
+\begin{itemize}
+\item Google OR-Tools, \href{https://developers.google.com/optimization/cp/cp_solver}{\emph{CP-SAT Solver} (tài liệu chính thức)}.
+\item Gurobi Optimizer, \href{https://docs.gurobi.com/projects/optimizer/en/current/reference/cpp/callback.html}{\emph{C++ GRBCallback reference} (tài liệu chính thức)}.
+\end{itemize}
+
+\end{document}
